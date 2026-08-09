@@ -2,7 +2,9 @@ import { initWebGPU, fetchText } from './gpu.js'
 import { generateGravityNoiseTexture, generateCapillaryNoiseTexture } from './noise.js'
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
+import { Sky } from './sky.js'
 import { OrbitCamera } from './camera.js'
+import { invert } from './mat4.js'
 import { setupUI } from './ui.js'
 import { setupNoiseDebug } from './debug.js'
 
@@ -10,17 +12,19 @@ const canvas = document.getElementById('canvas')
 const GRAVITY = 9.81
 const CAPILLARY_SIGMA_RHO = 7.4e-5
 const CAP_DISPERSION = 1.5
+const SUN_AZIMUTH = [0.65, -0.76]
 
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
-  const [waveFieldCode, mipCode, oceanCode] = await Promise.all(
-    ['wave_field', 'mip', 'ocean'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
+  const [waveFieldCode, mipCode, oceanCode, atmosphereCode, skyCode] = await Promise.all(
+    ['wave_field', 'mip', 'ocean', 'atmosphere', 'sky'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
   )
   const noise = generateGravityNoiseTexture(device)
   const capNoise = generateCapillaryNoiseTexture(device)
   const waveField = new WaveField(device, waveFieldCode, mipCode, noise)
   const capField = new WaveField(device, waveFieldCode, mipCode, capNoise)
-  const ocean = new Ocean(device, oceanCode, waveField.texture, capField.texture, format)
+  const ocean = new Ocean(device, atmosphereCode + oceanCode, waveField.texture, capField.texture, format)
+  const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
   setupNoiseDebug([
@@ -84,7 +88,15 @@ async function main() {
         depthClearValue: 1,
       },
     })
-    ocean.render(pass, dt, params, noise, capNoise, camera.viewProj(w / h), camera.eye)
+    const elevation = params.sun * Math.PI / 180
+    const sunDir = [
+      SUN_AZIMUTH[0] * Math.cos(elevation),
+      Math.sin(elevation),
+      SUN_AZIMUTH[1] * Math.cos(elevation),
+    ]
+    const viewProj = camera.viewProj(w / h)
+    sky.render(pass, invert(viewProj), camera.eye, sunDir)
+    ocean.render(pass, dt, params, noise, capNoise, viewProj, camera.eye, sunDir)
     pass.end()
     device.queue.submit([encoder.finish()])
     requestAnimationFrame(frame)

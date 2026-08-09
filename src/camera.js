@@ -35,7 +35,7 @@ export class OrbitCamera {
 
   viewProj(aspect) {
     const view = lookAt(this.eye, [0, 0, 0], [0, 1, 0])
-    return multiply(perspective(Math.PI / 3, aspect, 0.5, 4000), view)
+    return multiply(perspective(Math.PI / 3, aspect, 0.5, 300000), view)
   }
 }
 

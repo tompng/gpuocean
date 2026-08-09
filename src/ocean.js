@@ -1,9 +1,12 @@
-import { normalize } from './mat4.js'
-
 const GRAVITY = 9.81
 // σ/ρ of water [m^3/s^2] for the capillary dispersion c = sqrt(g/k + (σ/ρ)k)
 const CAPILLARY_SIGMA_RHO = 7.4e-5
-const PATCH_SIZE = 100
+// Warped grid: uniform cells near the center, then exponential growth per
+// cell out to beyond the horizon distance seen from the camera's max height
+const GRID_N = 512
+const CELL = 0.8
+const LINEAR_CELLS = 160
+const CELL_GROWTH = 1.11
 const SCALE_RATIO = 0.68
 const MAX_LAYERS = 8
 const DIR_FRACS = [0, 0.9, -0.75, 0.45, -0.35, 0.7, -1, 0.2]
@@ -11,7 +14,6 @@ const UV_OFFSETS = [
   [0.11, 0.63], [0.42, 0.17], [0.78, 0.55], [0.05, 0.91],
   [0.33, 0.4], [0.66, 0.08], [0.9, 0.77], [0.24, 0.31],
 ]
-const SUN_DIR = normalize([0.6, 0.35, -0.7])
 const CAP_ANGLES = [0.4, -0.8, 1.7]
 // Anisotropic ripple directions follow the gravity waves (fractions of spread),
 // mimicking parasitic capillaries riding their parent waves
@@ -25,12 +27,22 @@ const CAP_UV_OFFSETS = [
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, format, opts = {}) {
     this.device = device
-    this.gridN = opts.gridN ?? 256
+    this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
     const module = device.createShaderModule({ code })
     const base = {
       layout: 'auto',
-      vertex: { module, entryPoint: 'vs' },
+      vertex: {
+        module,
+        entryPoint: 'vs',
+        buffers: [{
+          arrayStride: 12,
+          attributes: [
+            { shaderLocation: 0, offset: 0, format: 'float32x2' },
+            { shaderLocation: 1, offset: 8, format: 'float32' },
+          ],
+        }],
+      },
       multisample: { count: sampleCount },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     }
@@ -71,6 +83,7 @@ export class Ocean {
     this.lineIndices = createIndexBuffer(device, line)
     this.triCount = tri.length
     this.lineCount = line.length
+    this.vertexBuffer = createVertexBuffer(device, buildVertices(this.gridN))
 
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
@@ -78,18 +91,17 @@ export class Ocean {
     this.uniformData = new Float32Array(152)
   }
 
-  render(pass, dt, params, noise, capNoise, viewProj, eye) {
+  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir) {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
     u[16] = eye[0]; u[17] = eye[1]; u[18] = eye[2]; u[19] = this.time
-    u[20] = SUN_DIR[0]; u[21] = SUN_DIR[1]; u[22] = SUN_DIR[2]; u[23] = PATCH_SIZE
+    u[20] = sunDir[0]; u[21] = sunDir[1]; u[22] = sunDir[2]
     const count = Math.round(params.layers)
     u[24] = count
     u[25] = params.choppiness
     u[26] = noise.size * noise.dispGradPerTexel
     u[27] = noise.size
-    u[28] = this.gridN
 
     const spread = params.spread * Math.PI / 180
     let sq = 0
@@ -146,9 +158,48 @@ export class Ocean {
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
     pass.setBindGroup(0, params.wireframe ? this.wireBindGroup : this.fillBindGroup)
+    pass.setVertexBuffer(0, this.vertexBuffer)
     pass.setIndexBuffer(params.wireframe ? this.lineIndices : this.triIndices, 'uint32')
     pass.drawIndexed(params.wireframe ? this.lineCount : this.triCount)
   }
+}
+
+function warpAxis(i) {
+  const a = Math.abs(i)
+  const sign = Math.sign(i)
+  if (a <= LINEAR_CELLS) return sign * a * CELL
+  return sign * (LINEAR_CELLS * CELL + CELL * (CELL_GROWTH ** (a - LINEAR_CELLS) - 1) / (CELL_GROWTH - 1))
+}
+
+function buildVertices(n) {
+  const half = n / 2
+  const axis = new Float64Array(n + 1)
+  for (let i = 0; i <= n; i++) axis[i] = warpAxis(i - half)
+  const cellAt = i => {
+    const a = Math.min(Math.abs(i - half), half - 1)
+    return warpAxis(a + 1) - warpAxis(a)
+  }
+  const data = new Float32Array((n + 1) * (n + 1) * 3)
+  let p = 0
+  for (let iz = 0; iz <= n; iz++) {
+    for (let ix = 0; ix <= n; ix++) {
+      data[p++] = axis[ix]
+      data[p++] = axis[iz]
+      data[p++] = Math.max(cellAt(ix), cellAt(iz))
+    }
+  }
+  return data
+}
+
+function createVertexBuffer(device, data) {
+  const buffer = device.createBuffer({
+    size: data.byteLength,
+    usage: GPUBufferUsage.VERTEX,
+    mappedAtCreation: true,
+  })
+  new Float32Array(buffer.getMappedRange()).set(data)
+  buffer.unmap()
+  return buffer
 }
 
 function buildIndices(n) {
