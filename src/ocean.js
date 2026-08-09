@@ -140,6 +140,8 @@ export class Ocean {
     u[147] = 1 / Math.max(params.amplitude, 0.01)
     u[148] = params.depth
     u[149] = params.caustics
+    // caustic web cells scale with the ripple wavelength; 0.6 is the tuned default
+    u[150] = params.rippleScale / 0.6
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

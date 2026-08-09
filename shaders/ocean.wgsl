@@ -27,8 +27,8 @@ struct Uniforms {
   ampInv: f32,
   seaDepth: f32,
   causticStrength: f32,
+  causticScale: f32,
   depthPad0: f32,
-  depthPad1: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -148,8 +148,8 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // two drifting noise fields, sampled at the refracted bottom point so the
   // pattern swims with the surface; defocus fades it with column depth
   let bottomXZ = in.world.xz + refr.xz * (column / max(-refr.y, 0.05));
-  let cs = textureSample(capTex, samp, bottomXZ / 13.0 + vec2f(0.023, 0.011) * u.time).x
-         + textureSample(capTex, samp, bottomXZ / 8.7 + vec2f(-0.017, 0.019) * u.time).x;
+  let cs = textureSample(capTex, samp, bottomXZ / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
+         + textureSample(capTex, samp, bottomXZ / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
   let web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
   let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
