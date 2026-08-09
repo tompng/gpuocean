@@ -46,7 +46,7 @@ export class Ocean {
     })
 
     this.uniform = device.createBuffer({
-      size: 592,
+      size: 608,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -72,15 +72,17 @@ export class Ocean {
     this.triCount = tri.length
     this.lineCount = line.length
 
+    this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
-    this.uniformData = new Float32Array(148)
+    this.uniformData = new Float32Array(152)
   }
 
   render(pass, dt, params, noise, capNoise, viewProj, eye) {
     const u = this.uniformData
     u.set(viewProj, 0)
-    u[16] = eye[0]; u[17] = eye[1]; u[18] = eye[2]; u[19] = 0
+    this.time += dt
+    u[16] = eye[0]; u[17] = eye[1]; u[18] = eye[2]; u[19] = this.time
     u[20] = SUN_DIR[0]; u[21] = SUN_DIR[1]; u[22] = SUN_DIR[2]; u[23] = PATCH_SIZE
     const count = Math.round(params.layers)
     u[24] = count
@@ -134,6 +136,10 @@ export class Ocean {
     }
     u[144] = capNoise.size
     u[145] = params.rippleBias
+    u[146] = params.sss
+    u[147] = 1 / Math.max(params.amplitude, 0.01)
+    u[148] = params.depth
+    u[149] = params.caustics
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
