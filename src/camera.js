@@ -2,7 +2,7 @@ import { lookAt, multiply, perspective } from './mat4.js'
 
 export class OrbitCamera {
   constructor(canvas) {
-    this.yaw = -0.6
+    this.yaw = Math.PI - 0.6
     this.pitch = 0.3
     this.distance = 90
     let drag = null
