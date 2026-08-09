@@ -14,6 +14,13 @@
   }
   #panel label { display: grid; grid-template-columns: 80px 140px 36px; gap: 8px; align-items: center; }
   #panel span { text-align: right; }
+  #noiseDebug {
+    position: fixed; top: 10px; right: 10px; bottom: 10px; overflow: auto;
+    display: none; flex-direction: column; gap: 10px;
+    background: rgba(10, 20, 30, 0.8); color: #eee; padding: 10px;
+    border-radius: 8px; font: 11px/1.6 system-ui, sans-serif;
+  }
+  #noiseDebug canvas { width: 480px; display: block; }
   #error {
     position: fixed; inset: 0; display: none; place-items: center; text-align: center;
     background: #1a2633; color: #fff; font: 16px system-ui, sans-serif; padding: 2em;
@@ -34,7 +41,9 @@
   <label>rippleAniso <input id="rippleAniso" type="range" min="0" max="1" step="0.05" value="0.5"><span></span></label>
   <label>rippleBias <input id="rippleBias" type="range" min="0" max="1" step="0.05" value="0"><span></span></label>
   <label>wireframe <input id="wireframe" type="checkbox"></label>
+  <label>noise <input id="noiseView" type="checkbox"></label>
 </div>
+<div id="noiseDebug"></div>
 <div id="error"></div>
 <script type="module" src="src/main.js"></script>
 </body>

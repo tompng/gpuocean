@@ -10,7 +10,7 @@ export function generateGravityNoiseTexture(device, opts = {}) {
   const size = opts.size ?? 512
   const sigmaAlong = opts.sigmaAlong ?? 3
   const sigmaAlongWide = opts.sigmaAlongWide ?? 9
-  const sigmaCross = opts.sigmaCross ?? 24
+  const sigmaCross = opts.sigmaCross ?? 14
   const random = mulberry32(opts.seed ?? 12345)
 
   const n = size * size
@@ -49,6 +49,7 @@ export function generateGravityNoiseTexture(device, opts = {}) {
     size,
     wavesPerTile: wavesPerTile(h, hx, size),
     dispGradPerTexel: -1 / sigmaD,
+    channels: { height: h, disp: d },
   }
 }
 
@@ -75,6 +76,7 @@ export function generateCapillaryNoiseTexture(device, opts = {}) {
     size,
     wavesPerTile: wavesPerTile(h, hx, size),
     dispGradPerTexel: 0,
+    channels: { height: h },
   }
 }
 

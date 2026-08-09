@@ -1,6 +1,9 @@
 // Step 1: blend a few copies of the noise texture scrolling at different speeds
 // into one texture per frame, approximating in-band dispersion.
 const COPY_FACTORS = [-0.6, 0.15, 0.7]
+// Crest-parallel drift: advances oblique spectral components differently from
+// straight-ahead ones, imitating directional dispersion within one layer
+const COPY_FACTORS_Y = [0.5, -0.65, 0.35]
 const COPY_OFFSETS = [[0.13, 0.71], [0.53, 0.29], [0.87, 0.61]]
 
 export class WaveField {
@@ -63,6 +66,7 @@ export class WaveField {
     }
 
     this.phases = [0, 0, 0]
+    this.phasesY = [0, 0, 0]
     this.data = new Float32Array(12)
   }
 
@@ -71,7 +75,8 @@ export class WaveField {
     const weight = 1 / Math.sqrt(COPY_FACTORS.length)
     for (let i = 0; i < COPY_FACTORS.length; i++) {
       this.phases[i] += COPY_FACTORS[i] * dispersion * texFreq * dt
-      this.data.set([COPY_OFFSETS[i][0] - this.phases[i], COPY_OFFSETS[i][1], weight, 0], i * 4)
+      this.phasesY[i] += COPY_FACTORS_Y[i] * dispersion * texFreq * dt
+      this.data.set([COPY_OFFSETS[i][0] - this.phases[i], COPY_OFFSETS[i][1] - this.phasesY[i], weight, 0], i * 4)
     }
     this.device.queue.writeBuffer(this.uniform, 0, this.data)
   }

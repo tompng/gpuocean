@@ -4,6 +4,7 @@ import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { OrbitCamera } from './camera.js'
 import { setupUI } from './ui.js'
+import { setupNoiseDebug } from './debug.js'
 
 const canvas = document.getElementById('canvas')
 const GRAVITY = 9.81
@@ -22,6 +23,10 @@ async function main() {
   const ocean = new Ocean(device, oceanCode, waveField.texture, capField.texture, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
+  setupNoiseDebug([
+    { name: 'gravity', size: noise.size, channels: noise.channels },
+    { name: 'capillary', size: capNoise.size, channels: capNoise.channels },
+  ])
 
   let depth = null
   let msaa = null
