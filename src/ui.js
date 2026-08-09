@@ -1,6 +1,6 @@
 export function setupUI() {
   const params = { wireframe: false }
-  for (const id of ['wavelength', 'amplitude', 'choppiness', 'layers', 'spread', 'dispersion', 'ripple', 'rippleScale', 'rippleBias']) {
+  for (const id of ['wavelength', 'amplitude', 'choppiness', 'layers', 'spread', 'dispersion', 'ripple', 'rippleScale', 'rippleAniso', 'rippleBias']) {
     const input = document.getElementById(id)
     const value = input.parentElement.querySelector('span')
     const update = () => {

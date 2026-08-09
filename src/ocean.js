@@ -13,8 +13,14 @@ const UV_OFFSETS = [
 ]
 const SUN_DIR = normalize([0.6, 0.35, -0.7])
 const CAP_ANGLES = [0.4, -0.8, 1.7]
+// Anisotropic ripple directions follow the gravity waves (fractions of spread),
+// mimicking parasitic capillaries riding their parent waves
+const CAP_ANISO_FRACS = [0, 0.45, -0.35]
 const CAP_SCALES = [1, 0.72, 0.52]
-const CAP_UV_OFFSETS = [[0.19, 0.47], [0.61, 0.83], [0.07, 0.29]]
+const CAP_UV_OFFSETS = [
+  [0.19, 0.47], [0.61, 0.83], [0.07, 0.29],
+  [0.37, 0.71], [0.83, 0.13], [0.53, 0.59],
+]
 
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, format, opts = {}) {
@@ -40,7 +46,7 @@ export class Ocean {
     })
 
     this.uniform = device.createBuffer({
-      size: 496,
+      size: 592,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -67,8 +73,8 @@ export class Ocean {
     this.lineCount = line.length
 
     this.phases = new Float64Array(MAX_LAYERS)
-    this.capPhases = new Float64Array(CAP_ANGLES.length)
-    this.uniformData = new Float32Array(124)
+    this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
+    this.uniformData = new Float32Array(148)
   }
 
   render(pass, dt, params, noise, capNoise, viewProj, eye) {
@@ -106,23 +112,28 @@ export class Ocean {
 
     // ripple slider is a slope amplitude; height amplitude = slope * λ / 2π
     const capNorm = params.ripple / Math.sqrt(CAP_SCALES.length) / (2 * Math.PI)
-    for (let i = 0; i < CAP_ANGLES.length; i++) {
-      const lambda = params.rippleScale * CAP_SCALES[i]
-      const tile = lambda * capNoise.wavesPerTile
+    const isoWeight = Math.sqrt(1 - params.rippleAniso)
+    const anisoWeight = Math.sqrt(params.rippleAniso)
+    for (let i = 0; i < this.capPhases.length; i++) {
+      const aniso = i >= CAP_ANGLES.length
+      const j = i % CAP_SCALES.length
+      const lambda = params.rippleScale * CAP_SCALES[j]
+      const tile = lambda * (aniso ? noise : capNoise).wavesPerTile
       const k = 2 * Math.PI / lambda
       this.capPhases[i] += Math.sqrt(GRAVITY / k + CAPILLARY_SIGMA_RHO * k) / tile * dt
+      const angle = aniso ? CAP_ANISO_FRACS[j] * spread : CAP_ANGLES[j]
       const o = 96 + i * 8
-      u[o] = Math.cos(CAP_ANGLES[i])
-      u[o + 1] = Math.sin(CAP_ANGLES[i])
+      u[o] = Math.cos(angle)
+      u[o + 1] = Math.sin(angle)
       u[o + 2] = 1 / tile
-      u[o + 3] = capNorm * lambda
+      u[o + 3] = capNorm * lambda * (aniso ? anisoWeight : isoWeight)
       u[o + 4] = CAP_UV_OFFSETS[i][0] - this.capPhases[i]
       u[o + 5] = CAP_UV_OFFSETS[i][1]
       u[o + 6] = 0
       u[o + 7] = 0
     }
-    u[120] = capNoise.size
-    u[121] = params.rippleBias
+    u[144] = capNoise.size
+    u[145] = params.rippleBias
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

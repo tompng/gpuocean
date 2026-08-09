@@ -20,7 +20,7 @@ struct Uniforms {
   pad1: f32,
   pad2: f32,
   layers: array<Layer, 8>,
-  capLayers: array<Layer, 3>,
+  capLayers: array<Layer, 6>,
   capHGrad: f32,
   rippleBias: f32,
   capPad0: f32,
@@ -82,20 +82,33 @@ fn surfaceNormal(xz: vec2f, dist: f32) -> vec3f {
     dPx += vec3f(dir.x * dDdu * duvdx.x, amp * dot(grad, duvdx), dir.y * dDdu * duvdx.x);
     dPz += vec3f(dir.x * dDdu * duvdz.x, amp * dot(grad, duvdz), dir.y * dDdu * duvdz.x);
   }
-  // Parasitic capillaries concentrate on the front face of gravity waves,
-  // where the slope along the travel direction (+x) is negative
+  // Ripples concentrate where the long waves strain the surface: orbital
+  // convergence (compression, near crests) with the peak shifted toward the
+  // front face. Layers 0-2 are isotropic wind ripples (weak bias); layers 3-5
+  // are anisotropic parasitic-capillary ripples following the gravity waves.
   let front = smoothstep(0.0, 0.15, -dPx.y);
-  let capScale = mix(1.0, 2.0 * front, u.rippleBias) * clamp(1.0 - dist / 150.0, 0.0, 1.0);
-  for (var i = 0; i < 3; i++) {
+  let squeeze = smoothstep(0.0, 0.3, 2.0 - dPx.x - dPz.z);
+  let conc = front + squeeze;
+  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0);
+  let isoScale = mix(1.0, conc, u.rippleBias * 0.4) * fade;
+  let anisoScale = mix(1.0, conc, u.rippleBias) * fade;
+  for (var i = 0; i < 6; i++) {
     let l = u.capLayers[i];
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
-    let amp = capScale * l.dirScaleAmp.w;
     let uvc = vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * invL + l.scroll.xy;
-    let s = textureSample(capTex, samp, uvc);
-    let grad = vec2f(s.z, s.w) * u.capHGrad;
-    dPx.y += amp * dot(grad, vec2f(dir.x, -dir.y) * invL);
-    dPz.y += amp * dot(grad, vec2f(dir.y, dir.x) * invL);
+    var s: vec4f;
+    var amp: f32;
+    if (i < 3) {
+      s = textureSample(capTex, samp, uvc);
+      amp = isoScale * l.dirScaleAmp.w * u.capHGrad;
+    } else {
+      s = textureSample(waveTex, samp, uvc);
+      amp = anisoScale * l.dirScaleAmp.w * u.hGrad;
+    }
+    let grad = vec2f(s.z, s.w) * amp;
+    dPx.y += dot(grad, vec2f(dir.x, -dir.y) * invL);
+    dPz.y += dot(grad, vec2f(dir.y, dir.x) * invL);
   }
   return normalize(cross(dPz, dPx));
 }
