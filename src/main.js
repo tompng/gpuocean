@@ -1,11 +1,14 @@
 import { initWebGPU, fetchText } from './gpu.js'
-import { generateGravityNoiseTexture } from './noise.js'
+import { generateGravityNoiseTexture, generateCapillaryNoiseTexture } from './noise.js'
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { OrbitCamera } from './camera.js'
 import { setupUI } from './ui.js'
 
 const canvas = document.getElementById('canvas')
+const GRAVITY = 9.81
+const CAPILLARY_SIGMA_RHO = 7.4e-5
+const CAP_DISPERSION = 1.5
 
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
@@ -13,8 +16,10 @@ async function main() {
     ['wave_field', 'mip', 'ocean'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
   )
   const noise = generateGravityNoiseTexture(device)
+  const capNoise = generateCapillaryNoiseTexture(device)
   const waveField = new WaveField(device, waveFieldCode, mipCode, noise)
-  const ocean = new Ocean(device, oceanCode, waveField.texture, format)
+  const capField = new WaveField(device, waveFieldCode, mipCode, capNoise)
+  const ocean = new Ocean(device, oceanCode, waveField.texture, capField.texture, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
 
@@ -51,9 +56,14 @@ async function main() {
       })
     }
 
-    waveField.update(dt, params, noise)
+    const lambda = params.wavelength
+    waveField.update(dt, Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / (lambda * noise.wavesPerTile), params.dispersion)
+    const capK = 2 * Math.PI / params.rippleScale
+    const capSpeed = Math.sqrt(GRAVITY / capK + CAPILLARY_SIGMA_RHO * capK)
+    capField.update(dt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
+    capField.render(encoder)
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
         view: msaa.createView(),
@@ -69,7 +79,7 @@ async function main() {
         depthClearValue: 1,
       },
     })
-    ocean.render(pass, dt, params, noise, camera.viewProj(w / h), camera.eye)
+    ocean.render(pass, dt, params, noise, capNoise, camera.viewProj(w / h), camera.eye)
     pass.end()
     device.queue.submit([encoder.finish()])
     requestAnimationFrame(frame)

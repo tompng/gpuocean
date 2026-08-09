@@ -14,9 +14,7 @@ export function generateGravityNoiseTexture(device, opts = {}) {
   const random = mulberry32(opts.seed ?? 12345)
 
   const n = size * size
-  const noise = new Float32Array(n)
-  for (let i = 0; i < n; i++) noise[i] = random() * 2 - 1
-
+  const noise = randomArray(random, n)
   const h = smoothAxisX(noise, size, sigmaAlong)
   const wide = smoothAxisX(noise, size, sigmaAlongWide)
   for (let i = 0; i < n; i++) h[i] -= wide[i]
@@ -45,6 +43,49 @@ export function generateGravityNoiseTexture(device, opts = {}) {
   const sigmaD = Math.sqrt(dSq / n)
   for (let i = 0; i < n; i++) d[i] /= -sigmaD
 
+  const [hx, hy] = gradients(h, size)
+  return {
+    texture: createNoiseTexture(device, size, h, d, hx, hy),
+    size,
+    wavesPerTile: wavesPerTile(h, hx, size),
+    dispGradPerTexel: -1 / sigmaD,
+  }
+}
+
+// Isotropic band-passed noise for capillary ripples (normal perturbation only).
+// R: height, G: unused, B: dh/dx, A: dh/dy.
+export function generateCapillaryNoiseTexture(device, opts = {}) {
+  const size = opts.size ?? 256
+  const sigmaSmall = opts.sigmaSmall ?? 2
+  const sigmaLarge = opts.sigmaLarge ?? 6
+  const random = mulberry32(opts.seed ?? 54321)
+
+  const n = size * size
+  const noise = randomArray(random, n)
+  const h = smoothAxisX(noise, size, sigmaSmall)
+  smoothAxisYInPlace(h, size, sigmaSmall)
+  const wide = smoothAxisX(noise, size, sigmaLarge)
+  smoothAxisYInPlace(wide, size, sigmaLarge)
+  for (let i = 0; i < n; i++) h[i] -= wide[i]
+  normalizeVariance(h)
+
+  const [hx, hy] = gradients(h, size)
+  return {
+    texture: createNoiseTexture(device, size, h, null, hx, hy),
+    size,
+    wavesPerTile: wavesPerTile(h, hx, size),
+    dispGradPerTexel: 0,
+  }
+}
+
+function randomArray(random, n) {
+  const data = new Float32Array(n)
+  for (let i = 0; i < n; i++) data[i] = random() * 2 - 1
+  return data
+}
+
+function gradients(h, size) {
+  const n = size * size
   const hx = new Float32Array(n)
   const hy = new Float32Array(n)
   for (let y = 0; y < size; y++) {
@@ -58,21 +99,27 @@ export function generateGravityNoiseTexture(device, opts = {}) {
       hy[row + x] = (h[down + x] - h[up + x]) * 0.5
     }
   }
+  return [hx, hy]
+}
 
-  // Dominant wavenumber from the spectral moment: k_rms = sqrt(E[h_x^2] / E[h^2])
+// Dominant wavenumber from the spectral moment: k_rms = sqrt(E[h_x^2] / E[h^2])
+function wavesPerTile(h, hx, size) {
   let hSq = 0, hxSq = 0
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < h.length; i++) {
     hSq += h[i] * h[i]
     hxSq += hx[i] * hx[i]
   }
-  const kRms = Math.sqrt(hxSq / hSq)
+  return size * Math.sqrt(hxSq / hSq) / (2 * Math.PI)
+}
 
+function createNoiseTexture(device, size, r, g, b, a) {
+  const n = size * size
   const data = new Uint16Array(n * 4)
   for (let i = 0; i < n; i++) {
-    data[i * 4] = floatToHalf(h[i])
-    data[i * 4 + 1] = floatToHalf(d[i])
-    data[i * 4 + 2] = floatToHalf(hx[i])
-    data[i * 4 + 3] = floatToHalf(hy[i])
+    data[i * 4] = floatToHalf(r[i])
+    data[i * 4 + 1] = g ? floatToHalf(g[i]) : 0
+    data[i * 4 + 2] = floatToHalf(b[i])
+    data[i * 4 + 3] = floatToHalf(a[i])
   }
   const texture = device.createTexture({
     size: [size, size],
@@ -80,13 +127,7 @@ export function generateGravityNoiseTexture(device, opts = {}) {
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   })
   device.queue.writeTexture({ texture }, data, { bytesPerRow: size * 8 }, [size, size])
-
-  return {
-    texture,
-    size,
-    wavesPerTile: size * kRms / (2 * Math.PI),
-    dispGradPerTexel: -1 / sigmaD,
-  }
+  return texture
 }
 
 // Weights 5a^|k| - 4a^(2|k|) + a^(3|k|): with f(x) = a^(3x) - 4a^(2x) + 5a^x,

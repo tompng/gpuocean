@@ -20,11 +20,17 @@ struct Uniforms {
   pad1: f32,
   pad2: f32,
   layers: array<Layer, 8>,
+  capLayers: array<Layer, 3>,
+  capHGrad: f32,
+  rippleBias: f32,
+  capPad0: f32,
+  capPad1: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var waveTex: texture_2d<f32>;
+@group(0) @binding(3) var capTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) clip: vec4f,
@@ -59,7 +65,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
   return out;
 }
 
-fn surfaceNormal(xz: vec2f) -> vec3f {
+fn surfaceNormal(xz: vec2f, dist: f32) -> vec3f {
   var dPx = vec3f(1.0, 0.0, 0.0);
   var dPz = vec3f(0.0, 0.0, 1.0);
   for (var i = 0; i < i32(u.numLayers); i++) {
@@ -76,6 +82,21 @@ fn surfaceNormal(xz: vec2f) -> vec3f {
     dPx += vec3f(dir.x * dDdu * duvdx.x, amp * dot(grad, duvdx), dir.y * dDdu * duvdx.x);
     dPz += vec3f(dir.x * dDdu * duvdz.x, amp * dot(grad, duvdz), dir.y * dDdu * duvdz.x);
   }
+  // Parasitic capillaries concentrate on the front face of gravity waves,
+  // where the slope along the travel direction (+x) is negative
+  let front = smoothstep(0.0, 0.15, -dPx.y);
+  let capScale = mix(1.0, 2.0 * front, u.rippleBias) * clamp(1.0 - dist / 150.0, 0.0, 1.0);
+  for (var i = 0; i < 3; i++) {
+    let l = u.capLayers[i];
+    let dir = l.dirScaleAmp.xy;
+    let invL = l.dirScaleAmp.z;
+    let amp = capScale * l.dirScaleAmp.w;
+    let uvc = vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * invL + l.scroll.xy;
+    let s = textureSample(capTex, samp, uvc);
+    let grad = vec2f(s.z, s.w) * u.capHGrad;
+    dPx.y += amp * dot(grad, vec2f(dir.x, -dir.y) * invL);
+    dPz.y += amp * dot(grad, vec2f(dir.y, dir.x) * invL);
+  }
   return normalize(cross(dPz, dPx));
 }
 
@@ -88,7 +109,7 @@ fn skyColor(dir: vec3f) -> vec3f {
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
-  var n = surfaceNormal(in.gridXZ);
+  var n = surfaceNormal(in.gridXZ, distance(u.cameraPos, in.world));
   let v = normalize(u.cameraPos - in.world);
   if (dot(n, v) < 0.0) { n = -n; }
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);

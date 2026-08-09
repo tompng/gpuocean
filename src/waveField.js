@@ -2,7 +2,6 @@
 // into one texture per frame, approximating in-band dispersion.
 const COPY_FACTORS = [-0.6, 0.15, 0.7]
 const COPY_OFFSETS = [[0.13, 0.71], [0.53, 0.29], [0.87, 0.61]]
-const GRAVITY = 9.81
 
 export class WaveField {
   constructor(device, code, mipCode, noise) {
@@ -67,12 +66,11 @@ export class WaveField {
     this.data = new Float32Array(12)
   }
 
-  update(dt, params, noise) {
-    const lambda = params.wavelength
-    const texFreq = Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / (lambda * noise.wavesPerTile)
+  // texFreq: scroll speed in tiles per second matching the texture's dominant wave
+  update(dt, texFreq, dispersion) {
     const weight = 1 / Math.sqrt(COPY_FACTORS.length)
     for (let i = 0; i < COPY_FACTORS.length; i++) {
-      this.phases[i] += COPY_FACTORS[i] * params.dispersion * texFreq * dt
+      this.phases[i] += COPY_FACTORS[i] * dispersion * texFreq * dt
       this.data.set([COPY_OFFSETS[i][0] - this.phases[i], COPY_OFFSETS[i][1], weight, 0], i * 4)
     }
     this.device.queue.writeBuffer(this.uniform, 0, this.data)

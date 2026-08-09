@@ -1,6 +1,8 @@
 import { normalize } from './mat4.js'
 
 const GRAVITY = 9.81
+// σ/ρ of water [m^3/s^2] for the capillary dispersion c = sqrt(g/k + (σ/ρ)k)
+const CAPILLARY_SIGMA_RHO = 7.4e-5
 const PATCH_SIZE = 100
 const SCALE_RATIO = 0.68
 const MAX_LAYERS = 8
@@ -10,9 +12,12 @@ const UV_OFFSETS = [
   [0.33, 0.4], [0.66, 0.08], [0.9, 0.77], [0.24, 0.31],
 ]
 const SUN_DIR = normalize([0.6, 0.35, -0.7])
+const CAP_ANGLES = [0.4, -0.8, 1.7]
+const CAP_SCALES = [1, 0.72, 0.52]
+const CAP_UV_OFFSETS = [[0.19, 0.47], [0.61, 0.83], [0.07, 0.29]]
 
 export class Ocean {
-  constructor(device, code, waveTexture, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, format, opts = {}) {
     this.device = device
     this.gridN = opts.gridN ?? 256
     const sampleCount = opts.sampleCount ?? 4
@@ -35,7 +40,7 @@ export class Ocean {
     })
 
     this.uniform = device.createBuffer({
-      size: 384,
+      size: 496,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -49,9 +54,11 @@ export class Ocean {
       { binding: 0, resource: { buffer: this.uniform } },
       { binding: 1, resource: sampler },
       { binding: 2, resource: waveTexture.createView() },
+      { binding: 3, resource: capTexture.createView() },
     ]
     this.fillBindGroup = device.createBindGroup({ layout: this.fillPipeline.getBindGroupLayout(0), entries })
-    this.wireBindGroup = device.createBindGroup({ layout: this.wirePipeline.getBindGroupLayout(0), entries })
+    // fs_wire never samples capTex, so the auto layout of wirePipeline excludes binding 3
+    this.wireBindGroup = device.createBindGroup({ layout: this.wirePipeline.getBindGroupLayout(0), entries: entries.slice(0, 3) })
 
     const [tri, line] = buildIndices(this.gridN)
     this.triIndices = createIndexBuffer(device, tri)
@@ -60,10 +67,11 @@ export class Ocean {
     this.lineCount = line.length
 
     this.phases = new Float64Array(MAX_LAYERS)
-    this.uniformData = new Float32Array(96)
+    this.capPhases = new Float64Array(CAP_ANGLES.length)
+    this.uniformData = new Float32Array(124)
   }
 
-  render(pass, dt, params, noise, viewProj, eye) {
+  render(pass, dt, params, noise, capNoise, viewProj, eye) {
     const u = this.uniformData
     u.set(viewProj, 0)
     u[16] = eye[0]; u[17] = eye[1]; u[18] = eye[2]; u[19] = 0
@@ -95,6 +103,26 @@ export class Ocean {
       u[o + 6] = 0
       u[o + 7] = 0
     }
+
+    // ripple slider is a slope amplitude; height amplitude = slope * λ / 2π
+    const capNorm = params.ripple / Math.sqrt(CAP_SCALES.length) / (2 * Math.PI)
+    for (let i = 0; i < CAP_ANGLES.length; i++) {
+      const lambda = params.rippleScale * CAP_SCALES[i]
+      const tile = lambda * capNoise.wavesPerTile
+      const k = 2 * Math.PI / lambda
+      this.capPhases[i] += Math.sqrt(GRAVITY / k + CAPILLARY_SIGMA_RHO * k) / tile * dt
+      const o = 96 + i * 8
+      u[o] = Math.cos(CAP_ANGLES[i])
+      u[o + 1] = Math.sin(CAP_ANGLES[i])
+      u[o + 2] = 1 / tile
+      u[o + 3] = capNorm * lambda
+      u[o + 4] = CAP_UV_OFFSETS[i][0] - this.capPhases[i]
+      u[o + 5] = CAP_UV_OFFSETS[i][1]
+      u[o + 6] = 0
+      u[o + 7] = 0
+    }
+    u[120] = capNoise.size
+    u[121] = params.rippleBias
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
