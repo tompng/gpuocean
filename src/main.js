@@ -1,5 +1,5 @@
 import { initWebGPU, fetchText } from './gpu.js'
-import { generateGravityNoiseTexture, generateCapillaryNoiseTexture } from './noise.js'
+import { generateGravityNoiseTexture, generateCapillaryNoiseTexture, generateFoamPatternTexture } from './noise.js'
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { FoamSim } from './foam.js'
@@ -24,8 +24,9 @@ async function main() {
   const capNoise = generateCapillaryNoiseTexture(device)
   const waveField = new WaveField(device, waveFieldCode, mipCode, noise)
   const capField = new WaveField(device, waveFieldCode, mipCode, capNoise)
+  const foamPattern = generateFoamPatternTexture(device)
   const foam = new FoamSim(device, waveCommonCode + foamCode)
-  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, format)
+  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, foamPattern, format)
   foam.bind(ocean.uniform, waveField.texture)
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
@@ -33,6 +34,7 @@ async function main() {
   setupNoiseDebug([
     { name: 'gravity', size: noise.size, channels: noise.channels },
     { name: 'capillary', size: capNoise.size, channels: capNoise.channels },
+    { name: 'foamPattern', size: foamPattern.size, channels: foamPattern.channels },
   ])
 
   let depth = null

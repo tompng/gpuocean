@@ -62,13 +62,7 @@ export function generateCapillaryNoiseTexture(device, opts = {}) {
   const random = mulberry32(opts.seed ?? 54321)
 
   const n = size * size
-  const noise = randomArray(random, n)
-  const h = smoothAxisX(noise, size, sigmaSmall)
-  smoothAxisYInPlace(h, size, sigmaSmall)
-  const wide = smoothAxisX(noise, size, sigmaLarge)
-  smoothAxisYInPlace(wide, size, sigmaLarge)
-  for (let i = 0; i < n; i++) h[i] -= wide[i]
-  normalizeVariance(h)
+  const h = bandpass2D(randomArray(random, n), size, sigmaSmall, sigmaLarge)
 
   const [hx, hy] = gradients(h, size)
   return {
@@ -78,6 +72,63 @@ export function generateCapillaryNoiseTexture(device, opts = {}) {
     dispGradPerTexel: 0,
     channels: { height: h },
   }
+}
+
+// Sea-foam density pattern: a bubble-raft web (convergence lines where foam
+// collects) times granular clumping noise. Rendered with a threshold driven
+// by the accumulated foam age, so it must carry a full gradient of densities.
+export function generateFoamPatternTexture(device, opts = {}) {
+  const size = opts.size ?? 256
+  const random = mulberry32(opts.seed ?? 777)
+
+  const n = size * size
+  const web = bandpass2D(randomArray(random, n), size, 2, 6)
+  const mid = bandpass2D(randomArray(random, n), size, 3, 9)
+  const fine = bandpass2D(randomArray(random, n), size, 1, 2.5)
+  const density = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    const w = Math.max(0, 1 - 1.2 * Math.abs(web[i]))
+    density[i] = Math.min(Math.max(0.55 * w * w + 0.25 + 0.18 * mid[i] + 0.12 * fine[i], 0), 1)
+  }
+
+  const mipCount = Math.log2(size) + 1
+  const texture = device.createTexture({
+    size: [size, size],
+    format: 'rgba16float',
+    mipLevelCount: mipCount,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  })
+  let cur = density
+  let s = size
+  for (let level = 0; level < mipCount; level++) {
+    const data = new Uint16Array(s * s * 4)
+    for (let i = 0; i < s * s; i++) data[i * 4] = floatToHalf(cur[i])
+    device.queue.writeTexture({ texture, mipLevel: level }, data, { bytesPerRow: s * 8 }, [s, s])
+    if (s > 1) {
+      const half = s / 2
+      const next = new Float32Array(half * half)
+      for (let y = 0; y < half; y++) {
+        for (let x = 0; x < half; x++) {
+          const o = 2 * y * s + 2 * x
+          next[y * half + x] = (cur[o] + cur[o + 1] + cur[o + s] + cur[o + s + 1]) / 4
+        }
+      }
+      cur = next
+      s = half
+    }
+  }
+
+  return { texture, size, channels: { pattern: density } }
+}
+
+function bandpass2D(src, size, sigmaSmall, sigmaLarge) {
+  const a = smoothAxisX(src, size, sigmaSmall)
+  smoothAxisYInPlace(a, size, sigmaSmall)
+  const b = smoothAxisX(src, size, sigmaLarge)
+  smoothAxisYInPlace(b, size, sigmaLarge)
+  for (let i = 0; i < a.length; i++) a[i] -= b[i]
+  normalizeVariance(a)
+  return a
 }
 
 function randomArray(random, n) {

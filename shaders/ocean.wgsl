@@ -1,5 +1,6 @@
 @group(0) @binding(3) var capTex: texture_2d<f32>;
 @group(0) @binding(4) var foamTex: texture_2d<f32>;
+@group(0) @binding(5) var foamPatTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) clip: vec4f,
@@ -99,10 +100,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
   let r = reflect(-v, n);
   let spec = sunTint(u.sunDir) * (mix(8.0, 4.5, sunWarmth(u.sunDir)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
-  // Sunlight transmitted through thin wave crests toward a viewer facing the sun
+  let fuv = in.gridXZ / (2.0 * u.foamRegion) + 0.5;
+  let edgeFade = 1.0 - smoothstep(0.85, 1.0, max(abs(in.gridXZ.x), abs(in.gridXZ.y)) / u.foamRegion);
+  let foamAcc = textureSample(foamTex, samp, fuv).rg * edgeFade;
+  // Sunlight scattered toward the viewer by bubbles entrained under fresh breakers
   let towardSun = max(0.0, -dot(v, u.sunDir));
-  let thin = max(0.0, in.world.y * u.ampInv);
-  let sss = u.sssStrength * pow(towardSun, 3.0) * thin * thin;
+  let sss = u.sssStrength * pow(towardSun, 3.0) * foamAcc.g;
   // Flat sand bottom seen through the refracted view ray with per-channel
   // Beer-Lambert extinction; +1.4 is the sun-side path per meter of column
   // (refracted solar zenith ~44°)
@@ -123,12 +126,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   var water = mix(vec3f(0.02, 0.08, 0.10), sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
   var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;
-  let fuv = in.gridXZ / (2.0 * u.foamRegion) + 0.5;
-  let edgeFade = 1.0 - smoothstep(0.85, 1.0, max(abs(in.gridXZ.x), abs(in.gridXZ.y)) / u.foamRegion);
-  let breakup = 0.5 + 0.5 * textureSample(capTex, samp, in.gridXZ / 7.0 + vec2f(0.013, -0.007) * u.time).x;
-  let foam = clamp(textureSample(foamTex, samp, fuv).r * edgeFade * (0.4 + 1.2 * breakup), 0.0, 1.0);
+  // The foam pattern rides the water (material coords); as the accumulated
+  // foam decays the threshold rises, eroding the pattern from its thin parts
+  // so patches fragment into clumps before vanishing
+  let pat = textureSample(foamPatTex, samp, in.gridXZ / 5.0).r;
+  let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamAcc.r));
   let foamColor = lightTint * (0.72 + 0.22 * max(n.y, 0.0));
-  color = mix(color, foamColor, foam);
+  color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);
   color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
   color = 1.0 - exp(-1.8 * color);

@@ -8,7 +8,7 @@ export class FoamSim {
     this.device = device
     this.textures = [0, 1].map(() => device.createTexture({
       size: [SIZE, SIZE],
-      format: 'r16float',
+      format: 'rg16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     }))
     this.views = this.textures.map(t => t.createView())
@@ -16,7 +16,7 @@ export class FoamSim {
     this.pipeline = device.createRenderPipeline({
       layout: 'auto',
       vertex: { module, entryPoint: 'vs' },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: 'r16float' }] },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rg16float' }] },
     })
     this.index = 0
   }

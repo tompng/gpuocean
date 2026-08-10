@@ -49,10 +49,14 @@ fn waveJacobian(xz: vec2f) -> f32 {
   return dxx * dzz - dxz * dzx;
 }
 
+// R: surface foam (long-lived). G: entrained bubbles just under fresh
+// breakers (stricter threshold, short-lived) driving the scattering glow.
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let xz = (in.uv - 0.5) * (2.0 * u.foamRegion);
-  let gen = smoothstep(u.foamThreshold, u.foamThreshold - 0.25, waveJacobian(xz));
-  let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0).r;
-  return vec4f(max(prev * u.foamDecay, gen), 0.0, 0.0, 1.0);
+  let jac = waveJacobian(xz);
+  let genR = smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac);
+  let genG = smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac);
+  let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0).rg;
+  return vec4f(max(prev.r * u.foamDecay, genR), max(prev.g * u.foamDecayG, genG), 0.0, 1.0);
 }

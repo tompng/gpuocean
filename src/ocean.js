@@ -4,9 +4,9 @@ const CAPILLARY_SIGMA_RHO = 7.4e-5
 // Warped grid: uniform cells near the center, then exponential growth per
 // cell out to beyond the horizon distance seen from the camera's max height
 const GRID_N = 512
-const CELL = 0.8
+const CELL = 0.4
 const LINEAR_CELLS = 160
-const CELL_GROWTH = 1.11
+const CELL_GROWTH = 1.12
 const SCALE_RATIO = 0.68
 const MAX_LAYERS = 8
 const DIR_FRACS = [0, 0.9, -0.75, 0.45, -0.35, 0.7, -1, 0.2]
@@ -24,11 +24,12 @@ const CAP_UV_OFFSETS = [
   [0.37, 0.71], [0.83, 0.13], [0.53, 0.59],
 ]
 // Half-extent of the foam accumulation buffer around the origin [m]
-const FOAM_REGION = 200
+const FOAM_REGION = 80
 const FOAM_LIFETIME = 6
+const FOAM_LIFETIME_BUBBLES = 1.5
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -61,7 +62,7 @@ export class Ocean {
     })
 
     this.uniform = device.createBuffer({
-      size: 624,
+      size: 640,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -78,9 +79,10 @@ export class Ocean {
       { binding: 3, resource: capTexture.createView() },
     ]
     // One bind group per foam ping-pong texture
+    const patternView = foamPattern.texture.createView()
     this.fillBindGroups = foamViews.map(view => device.createBindGroup({
       layout: this.fillPipeline.getBindGroupLayout(0),
-      entries: [...entries, { binding: 4, resource: view }],
+      entries: [...entries, { binding: 4, resource: view }, { binding: 5, resource: patternView }],
     }))
     // fs_wire samples no textures, so the auto layout of wirePipeline excludes bindings 3+
     this.wireBindGroup = device.createBindGroup({ layout: this.wirePipeline.getBindGroupLayout(0), entries: entries.slice(0, 3) })
@@ -95,7 +97,7 @@ export class Ocean {
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
-    this.uniformData = new Float32Array(156)
+    this.uniformData = new Float32Array(160)
   }
 
   render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex) {
@@ -171,6 +173,7 @@ export class Ocean {
     u[153] = params.foam
     u[154] = FOAM_REGION
     u[155] = Math.exp(-dt / FOAM_LIFETIME)
+    u[156] = Math.exp(-dt / FOAM_LIFETIME_BUBBLES)
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

@@ -3,8 +3,8 @@ import { lookAt, multiply, perspective } from './mat4.js'
 export class OrbitCamera {
   constructor(canvas) {
     this.yaw = Math.PI - 0.6
-    this.pitch = 0.3
-    this.distance = 90
+    this.pitch = 0.18
+    this.distance = 20
     let drag = null
     canvas.addEventListener('pointerdown', e => {
       drag = [e.clientX, e.clientY]
@@ -20,7 +20,7 @@ export class OrbitCamera {
     canvas.addEventListener('pointercancel', () => { drag = null })
     canvas.addEventListener('wheel', e => {
       e.preventDefault()
-      this.distance = clamp(this.distance * Math.exp(e.deltaY * 0.0015), 3, 1000)
+      this.distance = clamp(this.distance * Math.exp(e.deltaY * 0.0015), 1, 1000)
     }, { passive: false })
   }
 
