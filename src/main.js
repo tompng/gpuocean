@@ -65,11 +65,12 @@ async function main() {
       })
     }
 
+    const waveDt = params.pause ? 0 : dt
     const lambda = params.wavelength
-    waveField.update(dt, Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / (lambda * noise.wavesPerTile), params.dispersion)
+    waveField.update(waveDt, Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / (lambda * noise.wavesPerTile), params.dispersion)
     const capK = 2 * Math.PI / params.rippleScale
     const capSpeed = Math.sqrt(GRAVITY / capK + CAPILLARY_SIGMA_RHO * capK)
-    capField.update(dt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
+    capField.update(waveDt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)
@@ -96,7 +97,7 @@ async function main() {
     ]
     const viewProj = camera.viewProj(w / h)
     sky.render(pass, invert(viewProj), camera.eye, sunDir)
-    ocean.render(pass, dt, params, noise, capNoise, viewProj, camera.eye, sunDir)
+    ocean.render(pass, waveDt, params, noise, capNoise, viewProj, camera.eye, sunDir)
     pass.end()
     device.queue.submit([encoder.finish()])
     requestAnimationFrame(frame)

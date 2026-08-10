@@ -1,6 +1,6 @@
 export function setupUI() {
-  const params = { wireframe: false }
-  for (const id of ['wavelength', 'amplitude', 'choppiness', 'layers', 'spread', 'dispersion', 'ripple', 'rippleScale', 'rippleAniso', 'rippleBias', 'sss', 'depth', 'caustics', 'sun']) {
+  const params = {}
+  for (const id of ['wavelength', 'amplitude', 'choppiness', 'layers', 'spread', 'dispersion', 'ripple', 'rippleScale', 'rippleAniso', 'rippleBias', 'sss', 'depth', 'caustics', 'sun', 'lean']) {
     const input = document.getElementById(id)
     const value = input.parentElement.querySelector('span')
     const update = () => {
@@ -10,7 +10,10 @@ export function setupUI() {
     input.addEventListener('input', update)
     update()
   }
-  const wireframe = document.getElementById('wireframe')
-  wireframe.addEventListener('change', () => { params.wireframe = wireframe.checked })
+  for (const id of ['pause', 'wireframe']) {
+    const box = document.getElementById(id)
+    params[id] = false
+    box.addEventListener('change', () => { params[id] = box.checked })
+  }
   return params
 }

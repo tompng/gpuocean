@@ -28,7 +28,11 @@ struct Uniforms {
   seaDepth: f32,
   causticStrength: f32,
   causticScale: f32,
-  depthPad0: f32,
+  leanX: f32,
+  leanY: f32,
+  leanPad0: f32,
+  leanPad1: f32,
+  leanPad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -67,6 +71,12 @@ fn vs(in: VSIn) -> VSOut {
     height += l.dirScaleAmp.w * s.x;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y) * l.dirScaleAmp.xy;
   }
+  // Forward displacement through a convex ramp of crest-relative height:
+  // only tall crests lean (a linear ramp would shear every scale by the same
+  // angle, reading as wind-carved dunes), and f' saturates to bound the
+  // front-face compression
+  let eta = max(height * u.ampInv, 0.0);
+  disp += vec2f(u.leanX, u.leanY) * (eta * eta / (1.0 + eta) / u.ampInv);
   var out: VSOut;
   out.world = vec3f(xz.x + disp.x, height, xz.y + disp.y);
   out.gridXZ = xz;
@@ -74,7 +84,7 @@ fn vs(in: VSIn) -> VSOut {
   return out;
 }
 
-fn surfaceNormal(xz: vec2f, dist: f32) -> vec3f {
+fn surfaceNormal(xz: vec2f, dist: f32, eta: f32) -> vec3f {
   var dPx = vec3f(1.0, 0.0, 0.0);
   var dPz = vec3f(0.0, 0.0, 1.0);
   for (var i = 0; i < i32(u.numLayers); i++) {
@@ -91,6 +101,9 @@ fn surfaceNormal(xz: vec2f, dist: f32) -> vec3f {
     dPx += vec3f(dir.x * dDdu * duvdx.x, amp * dot(grad, duvdx), dir.y * dDdu * duvdx.x);
     dPz += vec3f(dir.x * dDdu * duvdz.x, amp * dot(grad, duvdz), dir.y * dDdu * duvdz.x);
   }
+  let leanSlope = (eta * eta + 2.0 * eta) / ((1.0 + eta) * (1.0 + eta));
+  dPx += vec3f(u.leanX * leanSlope * dPx.y, 0.0, u.leanY * leanSlope * dPx.y);
+  dPz += vec3f(u.leanX * leanSlope * dPz.y, 0.0, u.leanY * leanSlope * dPz.y);
   // Ripples concentrate where the long waves strain the surface: orbital
   // convergence (compression, near crests) with the peak shifted toward the
   // front face. Layers 0-2 are isotropic wind ripples (weak bias); layers 3-5
@@ -125,7 +138,7 @@ fn surfaceNormal(xz: vec2f, dist: f32) -> vec3f {
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let dist = distance(u.cameraPos, in.world);
-  var n = surfaceNormal(in.gridXZ, dist);
+  var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0));
   let v = normalize(u.cameraPos - in.world);
   if (dot(n, v) < 0.0) { n = -n; }
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);

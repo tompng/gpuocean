@@ -58,7 +58,7 @@ export class Ocean {
     })
 
     this.uniform = device.createBuffer({
-      size: 608,
+      size: 624,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -88,7 +88,7 @@ export class Ocean {
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
-    this.uniformData = new Float32Array(152)
+    this.uniformData = new Float32Array(156)
   }
 
   render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir) {
@@ -108,11 +108,15 @@ export class Ocean {
     for (let i = 0; i < count; i++) sq += SCALE_RATIO ** (2 * i)
     // amp_i ∝ λ_i keeps per-layer steepness constant; total variance = amplitude^2
     const ampNorm = params.amplitude / Math.sqrt(sq)
+    let meanX = 0
+    let meanZ = 0
     for (let i = 0; i < count; i++) {
       const lambda = params.wavelength * SCALE_RATIO ** i
       const tile = lambda * noise.wavesPerTile
       this.phases[i] += Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / tile * dt
       const angle = DIR_FRACS[i] * spread
+      meanX += SCALE_RATIO ** (2 * i) * Math.cos(angle)
+      meanZ += SCALE_RATIO ** (2 * i) * Math.sin(angle)
       const o = 32 + i * 8
       u[o] = Math.cos(angle)
       u[o + 1] = Math.sin(angle)
@@ -154,6 +158,9 @@ export class Ocean {
     u[149] = params.caustics
     // caustic web cells scale with the ripple wavelength; 0.6 is the tuned default
     u[150] = params.rippleScale / 0.6
+    const meanLen = Math.hypot(meanX, meanZ) || 1
+    u[151] = params.lean * meanX / meanLen
+    u[152] = params.lean * meanZ / meanLen
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
