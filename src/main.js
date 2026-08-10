@@ -2,6 +2,7 @@ import { initWebGPU, fetchText } from './gpu.js'
 import { generateGravityNoiseTexture, generateCapillaryNoiseTexture } from './noise.js'
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
+import { FoamSim } from './foam.js'
 import { Sky } from './sky.js'
 import { OrbitCamera } from './camera.js'
 import { invert } from './mat4.js'
@@ -16,14 +17,16 @@ const SUN_AZIMUTH = [0.65, -0.76]
 
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
-  const [waveFieldCode, mipCode, oceanCode, atmosphereCode, skyCode] = await Promise.all(
-    ['wave_field', 'mip', 'ocean', 'atmosphere', 'sky'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
+  const [waveFieldCode, mipCode, waveCommonCode, oceanCode, atmosphereCode, skyCode, foamCode] = await Promise.all(
+    ['wave_field', 'mip', 'wave_common', 'ocean', 'atmosphere', 'sky', 'foam'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
   )
   const noise = generateGravityNoiseTexture(device)
   const capNoise = generateCapillaryNoiseTexture(device)
   const waveField = new WaveField(device, waveFieldCode, mipCode, noise)
   const capField = new WaveField(device, waveFieldCode, mipCode, capNoise)
-  const ocean = new Ocean(device, atmosphereCode + oceanCode, waveField.texture, capField.texture, format)
+  const foam = new FoamSim(device, waveCommonCode + foamCode)
+  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, format)
+  foam.bind(ocean.uniform, waveField.texture)
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
@@ -74,6 +77,7 @@ async function main() {
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)
+    foam.render(encoder)
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
         view: msaa.createView(),
@@ -97,7 +101,7 @@ async function main() {
     ]
     const viewProj = camera.viewProj(w / h)
     sky.render(pass, invert(viewProj), camera.eye, sunDir)
-    ocean.render(pass, waveDt, params, noise, capNoise, viewProj, camera.eye, sunDir)
+    ocean.render(pass, waveDt, params, noise, capNoise, viewProj, camera.eye, sunDir, foam.index)
     pass.end()
     device.queue.submit([encoder.finish()])
     requestAnimationFrame(frame)

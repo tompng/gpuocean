@@ -1,55 +1,10 @@
-struct Layer {
-  // xy: direction, z: 1 / tile size, w: amplitude
-  dirScaleAmp: vec4f,
-  // xy: uv scroll offset
-  scroll: vec4f,
-}
-
-struct Uniforms {
-  viewProj: mat4x4f,
-  cameraPos: vec3f,
-  time: f32,
-  sunDir: vec3f,
-  padA: f32,
-  numLayers: f32,
-  choppiness: f32,
-  dGrad: f32,
-  hGrad: f32,
-  padB: f32,
-  pad0: f32,
-  pad1: f32,
-  pad2: f32,
-  layers: array<Layer, 8>,
-  capLayers: array<Layer, 6>,
-  capHGrad: f32,
-  rippleBias: f32,
-  sssStrength: f32,
-  ampInv: f32,
-  seaDepth: f32,
-  causticStrength: f32,
-  causticScale: f32,
-  leanX: f32,
-  leanY: f32,
-  leanPad0: f32,
-  leanPad1: f32,
-  leanPad2: f32,
-}
-
-@group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var samp: sampler;
-@group(0) @binding(2) var waveTex: texture_2d<f32>;
 @group(0) @binding(3) var capTex: texture_2d<f32>;
+@group(0) @binding(4) var foamTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) clip: vec4f,
   @location(0) gridXZ: vec2f,
   @location(1) world: vec3f,
-}
-
-fn layerUV(xz: vec2f, i: i32) -> vec2f {
-  let l = u.layers[i];
-  let dir = l.dirScaleAmp.xy;
-  return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * l.dirScaleAmp.z + l.scroll.xy;
 }
 
 struct VSIn {
@@ -168,6 +123,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   var water = mix(vec3f(0.02, 0.08, 0.10), sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
   var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;
+  let fuv = in.gridXZ / (2.0 * u.foamRegion) + 0.5;
+  let edgeFade = 1.0 - smoothstep(0.85, 1.0, max(abs(in.gridXZ.x), abs(in.gridXZ.y)) / u.foamRegion);
+  let breakup = 0.5 + 0.5 * textureSample(capTex, samp, in.gridXZ / 7.0 + vec2f(0.013, -0.007) * u.time).x;
+  let foam = clamp(textureSample(foamTex, samp, fuv).r * edgeFade * (0.4 + 1.2 * breakup), 0.0, 1.0);
+  let foamColor = lightTint * (0.72 + 0.22 * max(n.y, 0.0));
+  color = mix(color, foamColor, foam);
   let fog = 1.0 - exp(-dist * 3e-5);
   color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
   color = 1.0 - exp(-1.8 * color);

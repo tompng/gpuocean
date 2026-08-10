@@ -23,9 +23,12 @@ const CAP_UV_OFFSETS = [
   [0.19, 0.47], [0.61, 0.83], [0.07, 0.29],
   [0.37, 0.71], [0.83, 0.13], [0.53, 0.59],
 ]
+// Half-extent of the foam accumulation buffer around the origin [m]
+const FOAM_REGION = 200
+const FOAM_LIFETIME = 6
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -74,8 +77,12 @@ export class Ocean {
       { binding: 2, resource: waveTexture.createView() },
       { binding: 3, resource: capTexture.createView() },
     ]
-    this.fillBindGroup = device.createBindGroup({ layout: this.fillPipeline.getBindGroupLayout(0), entries })
-    // fs_wire never samples capTex, so the auto layout of wirePipeline excludes binding 3
+    // One bind group per foam ping-pong texture
+    this.fillBindGroups = foamViews.map(view => device.createBindGroup({
+      layout: this.fillPipeline.getBindGroupLayout(0),
+      entries: [...entries, { binding: 4, resource: view }],
+    }))
+    // fs_wire samples no textures, so the auto layout of wirePipeline excludes bindings 3+
     this.wireBindGroup = device.createBindGroup({ layout: this.wirePipeline.getBindGroupLayout(0), entries: entries.slice(0, 3) })
 
     const [tri, line] = buildIndices(this.gridN)
@@ -91,7 +98,7 @@ export class Ocean {
     this.uniformData = new Float32Array(156)
   }
 
-  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir) {
+  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex) {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
@@ -161,10 +168,13 @@ export class Ocean {
     const meanLen = Math.hypot(meanX, meanZ) || 1
     u[151] = params.lean * meanX / meanLen
     u[152] = params.lean * meanZ / meanLen
+    u[153] = params.foam
+    u[154] = FOAM_REGION
+    u[155] = Math.exp(-dt / FOAM_LIFETIME)
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
-    pass.setBindGroup(0, params.wireframe ? this.wireBindGroup : this.fillBindGroup)
+    pass.setBindGroup(0, params.wireframe ? this.wireBindGroup : this.fillBindGroups[foamIndex])
     pass.setVertexBuffer(0, this.vertexBuffer)
     pass.setIndexBuffer(params.wireframe ? this.lineIndices : this.triIndices, 'uint32')
     pass.drawIndexed(params.wireframe ? this.lineCount : this.triCount)
