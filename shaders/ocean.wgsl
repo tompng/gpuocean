@@ -123,15 +123,19 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
   let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
+  // Direct sunlight in the water column fades as the sun drops; the floor
+  // stands in for diffuse sky light
+  let sunLevel = mix(0.18, 1.0, smoothstep(0.0, 0.5, clamp(u.sunDir.y, 0.0, 1.0)));
   var water = mix(vec3f(0.02, 0.08, 0.10), sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
+  water *= sunLevel;
   var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
   // so patches fragment into clumps before vanishing
   let pat = textureSample(foamPatTex, samp, in.gridXZ / 5.0).r;
   let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamAcc.r));
-  let foamColor = lightTint * (0.72 + 0.22 * max(n.y, 0.0));
+  let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);
   color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);

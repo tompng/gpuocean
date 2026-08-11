@@ -25,8 +25,6 @@ const CAP_UV_OFFSETS = [
 ]
 // Half-extent of the foam accumulation buffer around the origin [m]
 const FOAM_REGION = 80
-const FOAM_LIFETIME = 6
-const FOAM_LIFETIME_BUBBLES = 1.5
 
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, format, opts = {}) {
@@ -172,8 +170,8 @@ export class Ocean {
     u[152] = params.lean * meanZ / meanLen
     u[153] = params.foam
     u[154] = FOAM_REGION
-    u[155] = Math.exp(-dt / FOAM_LIFETIME)
-    u[156] = Math.exp(-dt / FOAM_LIFETIME_BUBBLES)
+    u[155] = Math.exp(-dt / params.foamLife)
+    u[156] = Math.exp(-dt / (params.foamLife * 0.25))
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
