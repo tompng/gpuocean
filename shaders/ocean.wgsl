@@ -33,8 +33,13 @@ fn vs(in: VSIn) -> VSOut {
   // front-face compression
   let eta = max(height * u.ampInv, 0.0);
   disp += vec2f(u.leanX, u.leanY) * (eta * eta / (1.0 + eta) / u.ampInv);
+  let dispXZ = xz + disp;
+  // Smooth clamp: full wave motion everywhere, but the surface never sinks
+  // below the sand (kept a hair above so the wetted film stays visible)
+  let ty = terrainHeight(dispXZ);
+  let dy = height - (ty + 0.01);
   var out: VSOut;
-  out.world = vec3f(xz.x + disp.x, height, xz.y + disp.y);
+  out.world = vec3f(dispXZ.x, ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225)), dispXZ.y);
   out.gridXZ = xz;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
@@ -95,6 +100,10 @@ fn surfaceNormal(xz: vec2f, dist: f32, eta: f32) -> vec3f {
 fn fs(in: VSOut) -> @location(0) vec4f {
   let dist = distance(u.cameraPos, in.world);
   var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0));
+  let ty = terrainHeight(in.world.xz);
+  let column = max(in.world.y - ty, 0.0);
+  let waterM = smoothstep(0.0, 0.05, column);
+  n = normalize(mix(normalize(vec3f(-u.slope, 1.0, 0.0)), n, waterM));
   let v = normalize(u.cameraPos - in.world);
   if (dot(n, v) < 0.0) { n = -n; }
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
@@ -111,7 +120,6 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Beer-Lambert extinction; +1.4 is the sun-side path per meter of column
   // (refracted solar zenith ~44°)
   let refr = refract(-v, n, 0.752);
-  let column = max(in.world.y + u.seaDepth, 0.0);
   let pathLen = column * (1.0 / max(-refr.y, 0.05) + 1.4);
   let trans = exp(-vec3f(0.25, 0.04, 0.02) * pathLen);
   // Caustic web on the sand: bright filaments along the zero-crossing lines of
@@ -121,7 +129,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let cs = textureSample(capTex, samp, bottomXZ / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
          + textureSample(capTex, samp, bottomXZ / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
   let web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
-  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
+  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * waterM;
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
   let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
   // Direct sunlight in the water column fades as the sun drops; the floor
@@ -131,6 +139,9 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   water += vec3f(0.05, 0.45, 0.38) * sss;
   water *= sunLevel;
   var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;
+  // Dry sand above the runup line: matte, no fresnel reflection or caustics
+  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0));
+  color = mix(sandMatte, color, waterM);
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
   // so patches fragment into clumps before vanishing

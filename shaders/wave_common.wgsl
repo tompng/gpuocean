@@ -38,8 +38,8 @@ struct Uniforms {
   foamDecay: f32,
   foamDecayG: f32,
   foamRise: f32,
-  fPad1: f32,
-  fPad2: f32,
+  shoreX: f32,
+  slope: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -50,4 +50,10 @@ fn layerUV(xz: vec2f, i: i32) -> vec2f {
   let l = u.layers[i];
   let dir = l.dirScaleAmp.xy;
   return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * l.dirScaleAmp.z + l.scroll.xy;
+}
+
+// Beach rising along +x (the mean wave direction), flat sea floor offshore,
+// capped at a flat berm above the waterline
+fn terrainHeight(xz: vec2f) -> f32 {
+  return min(max(u.slope * (xz.x - u.shoreX), -u.seaDepth), 3.0);
 }

@@ -175,6 +175,8 @@ export class Ocean {
     u[155] = Math.exp(-dt / params.foamLife)
     u[156] = Math.exp(-dt / (params.foamLife * 0.25))
     u[157] = Math.exp(-dt / FOAM_RISE)
+    u[158] = params.shore
+    u[159] = params.slope
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

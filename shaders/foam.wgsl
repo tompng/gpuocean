@@ -14,9 +14,9 @@ fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
   return out;
 }
 
-// Horizontal-map Jacobian of the displaced surface, matching the terms
-// accumulated in the ocean shader's surfaceNormal
-fn waveJacobian(xz: vec2f) -> f32 {
+// Horizontal-map Jacobian and height of the displaced surface, the Jacobian
+// terms matching the ocean shader's surfaceNormal
+fn waveSurface(xz: vec2f) -> vec2f {
   var dxx = 1.0;
   var dxz = 0.0;
   var dzx = 0.0;
@@ -46,7 +46,7 @@ fn waveJacobian(xz: vec2f) -> f32 {
   dxz += u.leanY * ls * gradH.x;
   dzx += u.leanX * ls * gradH.y;
   dzz += u.leanY * ls * gradH.y;
-  return dxx * dzz - dxz * dzx;
+  return vec2f(dxx * dzz - dxz * dzx, height);
 }
 
 // R: surface foam (long-lived). G: entrained bubbles just under fresh
@@ -56,9 +56,16 @@ fn waveJacobian(xz: vec2f) -> f32 {
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let xz = (in.uv - 0.5) * (2.0 * u.foamRegion);
-  let jac = waveJacobian(xz);
-  let genR = smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac);
-  let genG = smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac);
+  let s = waveSurface(xz);
+  let jac = s.x;
+  let ty = terrainHeight(xz);
+  // Depth-induced breaking (crest height vs local depth) in the surf zone,
+  // and deposition along the sweeping runup line on the beach face
+  let dNow = max(-ty, 0.05);
+  let genSurf = smoothstep(0.55, 0.9, s.y / dNow) * smoothstep(0.0, 0.5, dNow);
+  let genTip = smoothstep(-1.5, -0.2, ty) * smoothstep(0.3, 0.05, abs(s.y - ty));
+  let genR = max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac), genSurf), genTip);
+  let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac), genSurf);
   let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);
   let smoothR = mix(genR, prev.b, u.foamRise);
   let smoothG = mix(genG, prev.a, u.foamRise);
