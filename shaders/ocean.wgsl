@@ -103,9 +103,10 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let fuv = in.gridXZ / (2.0 * u.foamRegion) + 0.5;
   let edgeFade = 1.0 - smoothstep(0.85, 1.0, max(abs(in.gridXZ.x), abs(in.gridXZ.y)) / u.foamRegion);
   let foamAcc = textureSample(foamTex, samp, fuv).rg * edgeFade;
-  // Sunlight scattered toward the viewer by bubbles entrained under fresh breakers
+  // Bubble clouds scatter multiply and emerge nearly isotropic (white water);
+  // a mild forward lobe remains for thin backlit crests
   let towardSun = max(0.0, -dot(v, u.sunDir));
-  let sss = u.sssStrength * pow(towardSun, 3.0) * foamAcc.g;
+  let sss = u.sssStrength * (0.55 + 0.45 * towardSun * towardSun) * foamAcc.g;
   // Flat sand bottom seen through the refracted view ray with per-channel
   // Beer-Lambert extinction; +1.4 is the sun-side path per meter of column
   // (refracted solar zenith ~44°)
@@ -126,7 +127,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Direct sunlight in the water column fades as the sun drops; the floor
   // stands in for diffuse sky light
   let sunLevel = mix(0.18, 1.0, smoothstep(0.0, 0.5, clamp(u.sunDir.y, 0.0, 1.0)));
-  var water = mix(vec3f(0.02, 0.08, 0.10), sand, trans) * lightTint;
+  var water = mix(vec3f(0.004, 0.02, 0.05), sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
   water *= sunLevel;
   var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;

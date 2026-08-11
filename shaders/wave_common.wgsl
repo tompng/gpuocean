@@ -37,7 +37,7 @@ struct Uniforms {
   foamRegion: f32,
   foamDecay: f32,
   foamDecayG: f32,
-  fPad0: f32,
+  foamRise: f32,
   fPad1: f32,
   fPad2: f32,
 }

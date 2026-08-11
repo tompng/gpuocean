@@ -25,6 +25,8 @@ const CAP_UV_OFFSETS = [
 ]
 // Half-extent of the foam accumulation buffer around the origin [m]
 const FOAM_REGION = 80
+// Rise time of foam generation, roughly the crest's texel-crossing time [s]
+const FOAM_RISE = 0.08
 
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, format, opts = {}) {
@@ -172,6 +174,7 @@ export class Ocean {
     u[154] = FOAM_REGION
     u[155] = Math.exp(-dt / params.foamLife)
     u[156] = Math.exp(-dt / (params.foamLife * 0.25))
+    u[157] = Math.exp(-dt / FOAM_RISE)
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

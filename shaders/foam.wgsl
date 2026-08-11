@@ -51,12 +51,16 @@ fn waveJacobian(xz: vec2f) -> f32 {
 
 // R: surface foam (long-lived). G: entrained bubbles just under fresh
 // breakers (stricter threshold, short-lived) driving the scattering glow.
+// B/A: one-pole smoothed generation feeding R/G, so the breaking front
+// rises over ~0.1s instead of popping in frame- and texel-sized steps.
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let xz = (in.uv - 0.5) * (2.0 * u.foamRegion);
   let jac = waveJacobian(xz);
   let genR = smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac);
   let genG = smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac);
-  let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0).rg;
-  return vec4f(max(prev.r * u.foamDecay, genR), max(prev.g * u.foamDecayG, genG), 0.0, 1.0);
+  let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);
+  let smoothR = mix(genR, prev.b, u.foamRise);
+  let smoothG = mix(genG, prev.a, u.foamRise);
+  return vec4f(max(prev.r * u.foamDecay, smoothR), max(prev.g * u.foamDecayG, smoothG), smoothR, smoothG);
 }
