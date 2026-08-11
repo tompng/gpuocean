@@ -29,7 +29,7 @@ const FOAM_REGION = 80
 const FOAM_RISE = 0.08
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, swashView, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -62,7 +62,7 @@ export class Ocean {
     })
 
     this.uniform = device.createBuffer({
-      size: 640,
+      size: 656,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -82,10 +82,18 @@ export class Ocean {
     const patternView = foamPattern.texture.createView()
     this.fillBindGroups = foamViews.map(view => device.createBindGroup({
       layout: this.fillPipeline.getBindGroupLayout(0),
-      entries: [...entries, { binding: 4, resource: view }, { binding: 5, resource: patternView }],
+      entries: [
+        ...entries,
+        { binding: 4, resource: view },
+        { binding: 5, resource: patternView },
+        { binding: 7, resource: swashView },
+      ],
     }))
-    // fs_wire samples no textures, so the auto layout of wirePipeline excludes bindings 3+
-    this.wireBindGroup = device.createBindGroup({ layout: this.wirePipeline.getBindGroupLayout(0), entries: entries.slice(0, 3) })
+    // fs_wire samples no textures, so the wire layout only holds the vertex-stage bindings
+    this.wireBindGroup = device.createBindGroup({
+      layout: this.wirePipeline.getBindGroupLayout(0),
+      entries: [...entries.slice(0, 3), { binding: 7, resource: swashView }],
+    })
 
     const [tri, line] = buildIndices(this.gridN)
     this.triIndices = createIndexBuffer(device, tri)
@@ -97,7 +105,8 @@ export class Ocean {
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
-    this.uniformData = new Float32Array(160)
+    this.uniformData = new Float32Array(164)
+    this.layerCache = []
   }
 
   render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex) {
@@ -135,7 +144,9 @@ export class Ocean {
       u[o + 5] = UV_OFFSETS[i][1]
       u[o + 6] = 0
       u[o + 7] = 0
+      this.layerCache[i] = { dx: u[o], dz: u[o + 1], invL: u[o + 2], amp: u[o + 3], su: u[o + 4], sv: u[o + 5] }
     }
+    this.layerCache.length = count
 
     // ripple slider is a slope amplitude; height amplitude = slope * λ / 2π
     const capNorm = params.ripple / Math.sqrt(CAP_SCALES.length) / (2 * Math.PI)
@@ -177,6 +188,7 @@ export class Ocean {
     u[157] = Math.exp(-dt / FOAM_RISE)
     u[158] = params.shore
     u[159] = params.slope
+    u[160] = Math.exp(-dt / 0.5)
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

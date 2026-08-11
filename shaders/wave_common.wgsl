@@ -40,6 +40,10 @@ struct Uniforms {
   foamRise: f32,
   shoreX: f32,
   slope: f32,
+  foamDecaySwallow: f32,
+  swPad0: f32,
+  swPad1: f32,
+  swPad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -56,4 +60,16 @@ fn layerUV(xz: vec2f, i: i32) -> vec2f {
 // capped at a flat berm above the waterline
 fn terrainHeight(xz: vec2f) -> f32 {
   return min(max(u.slope * (xz.x - u.shoreX), -u.seaDepth), 3.0);
+}
+
+// Per-column swash state from the CPU simulation:
+// x: film tip position, y: tip velocity, z: collision burst, w: wave waterline
+@group(0) @binding(7) var swashTex: texture_2d<f32>;
+
+fn swashState(z: f32) -> vec4f {
+  let n = i32(textureDimensions(swashTex).x);
+  let fz = clamp((z / (2.0 * u.foamRegion) + 0.5) * f32(n) - 0.5, 0.0, f32(n) - 1.0);
+  let i0 = i32(floor(fz));
+  let i1 = min(i0 + 1, n - 1);
+  return mix(textureLoad(swashTex, vec2i(i0, 0), 0), textureLoad(swashTex, vec2i(i1, 0), 0), fz - floor(fz));
 }

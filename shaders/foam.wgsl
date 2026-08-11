@@ -63,11 +63,20 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // and deposition along the sweeping runup line on the beach face
   let dNow = max(-ty, 0.05);
   let genSurf = smoothstep(0.55, 0.9, s.y / dNow) * smoothstep(0.0, 0.5, dNow);
-  let genTip = smoothstep(-1.5, -0.2, ty) * smoothstep(0.3, 0.05, abs(s.y - ty));
-  let genR = max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac), genSurf), genTip);
-  let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac), genSurf);
+  // Dense foam right at the advancing film tip (uprush only, none while
+  // retreating), plus a wider burst where a wave caught the backwash
+  let sw = swashState(xz.y);
+  let up = clamp(sw.y * 0.8, 0.0, 1.0);
+  let dTip = abs(xz.x - sw.x);
+  let genTip = (0.9 * smoothstep(0.8, 0.1, dTip) + 0.3 * smoothstep(2.5, 0.3, dTip)) * up;
+  let genBurst = min(sw.z, 1.0) * smoothstep(2.5, 0.4, dTip);
+  let genR = max(max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac), genSurf), genTip), genBurst);
+  let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac), max(genSurf, genBurst));
+  // Foam deposited on the beach is swallowed by the next wave, not carried
+  let swallowed = smoothstep(0.3, -0.7, xz.x - sw.w) * smoothstep(-1.2, -0.3, ty);
+  let decayR = mix(u.foamDecay, u.foamDecaySwallow, swallowed);
   let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);
   let smoothR = mix(genR, prev.b, u.foamRise);
   let smoothG = mix(genG, prev.a, u.foamRise);
-  return vec4f(max(prev.r * u.foamDecay, smoothR), max(prev.g * u.foamDecayG, smoothG), smoothR, smoothG);
+  return vec4f(max(prev.r * decayR, smoothR), max(prev.g * u.foamDecayG, smoothG), smoothR, smoothG);
 }

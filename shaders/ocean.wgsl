@@ -38,8 +38,13 @@ fn vs(in: VSIn) -> VSOut {
   // below the sand (kept a hair above so the wetted film stays visible)
   let ty = terrainHeight(dispXZ);
   let dy = height - (ty + 0.01);
+  var y = ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
+  // Thin swash film from the wave's own waterline out to the simulated tip;
+  // offshore the max() is inert since the wave surface stands far above it
+  let sw = swashState(xz.y);
+  y = max(y, ty + 0.01 + 0.04 * smoothstep(sw.x + 0.1, sw.x - 0.8, xz.x));
   var out: VSOut;
-  out.world = vec3f(dispXZ.x, ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225)), dispXZ.y);
+  out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
