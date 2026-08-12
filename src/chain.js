@@ -59,14 +59,16 @@ export class ChainSim {
       for (let j = 0; j < COLS; j++) {
         const z = (j / (COLS - 1) - 0.5) * 2 * region
         // the wave's own waterline: march landward from certainly-wet water
-        // to the first point where the surface dips below the sand
+        // to the first point where the rendered surface dips below the sand,
+        // using the same near-shore height attenuation as the shaders
         let edge = this.x0
-        let prevOver = sampleHeight(this.x0, z) - terr(this.x0)
+        let prevOver = sampleHeight(this.x0, z) * shoreHeightScale(terr(this.x0)) - terr(this.x0)
         if (prevOver >= 0) {
           edge = this.x0 + SPAN
           for (let i = 1; i <= EDGE_STEPS; i++) {
             const x = this.x0 + i * step
-            const over = sampleHeight(x, z) - terr(x)
+            const t = terr(x)
+            const over = sampleHeight(x, z) * shoreHeightScale(t) - t
             if (over < 0) {
               edge = x - step + step * prevOver / (prevOver - over)
               break
@@ -139,6 +141,12 @@ export class ChainSim {
       if (u[base + NODES - 1] > 0) u[base + NODES - 1] = 0
     }
   }
+}
+
+// must match shoreHeightScale in wave_common.wgsl
+function shoreHeightScale(ty) {
+  const s = Math.min(Math.max((ty + 1.2) / 1.05, 0), 1)
+  return 1 - 0.65 * s * s * (3 - 2 * s)
 }
 
 function smoothArray(a, k) {

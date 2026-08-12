@@ -73,6 +73,17 @@ fn terrainHeight(xz: vec2f) -> f32 {
 const SIM_NODES: i32 = 64;
 const SIM_COLS: i32 = 256;
 const SIM_SPAN: f32 = 24.0;
+// Water depth where the wave hands over to the film: the wave's clamp floor
+// rises to this inside the strip and the film tapers from it to zero at the tip
+const FILM_DEPTH: f32 = 0.05;
+
+// Waves flatten approaching the waterline: horizontal displacement over the
+// sloped terrain already reads as vertical motion there, and keeping the true
+// height out of the softmax floor stops wave volume sinking into the sand.
+// chain.js applies the same attenuation when marching for the wave edge.
+fn shoreHeightScale(xz: vec2f) -> f32 {
+  return mix(1.0, 0.35, smoothstep(-1.2, -0.15, terrainHeight(xz)));
+}
 
 fn simState(xz: vec2f) -> vec4f {
   let fx = clamp((xz.x - u.simX0) / (SIM_SPAN / f32(SIM_NODES - 1)), 0.0, f32(SIM_NODES - 1));

@@ -27,6 +27,7 @@ fn vs(in: VSIn) -> VSOut {
     height += l.dirScaleAmp.w * s.x;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y) * l.dirScaleAmp.xy;
   }
+  height *= shoreHeightScale(xz);
   // Forward displacement through a convex ramp of crest-relative height:
   // only tall crests lean (a linear ramp would shear every scale by the same
   // angle, reading as wind-carved dunes), and f' saturates to bound the
@@ -45,11 +46,20 @@ fn vs(in: VSIn) -> VSOut {
   let chain = simState(xz);
   disp = disp * shallowAmp * wSea * (1.0 - sb) + vec2f(chain.x, 0.0) * sb;
   let dispXZ = xz + disp;
-  // Smooth clamp: full wave motion everywhere, but the surface never sinks
-  // below the sand (kept a hair above so the wetted film stays visible)
+  // Smooth clamp: full wave motion, but the surface never sinks below the
+  // sand. Inside the strip the floor rises to FILM_DEPTH so the wave's
+  // waterline meets the film at the same depth instead of pinching to zero
   let ty = terrainHeight(dispXZ);
-  let dy = height - (ty + 0.01);
-  let y = ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
+  let zb = 1.0 - smoothstep(u.foamRegion - 8.0, u.foamRegion - 1.0, abs(xz.y));
+  let floorD = mix(0.01, FILM_DEPTH, zb);
+  let dy = height - (ty + floorD);
+  let yWave = ty + floorD + 0.5 * (dy + sqrt(dy * dy + 0.0225));
+  // The film is heightless: a terrain-following sheet whose depth matches
+  // the wave at the junction and tapers to zero at the tip, with zero end
+  // slopes so neither joint shows a crease
+  let tTip = clamp((xz.x - u.simX0) / SIM_SPAN, 0.0, 1.0);
+  let filmD = FILM_DEPTH * (1.0 - tTip * tTip * (3.0 - 2.0 * tTip));
+  let y = mix(yWave, ty + filmD, sb);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
@@ -57,7 +67,7 @@ fn vs(in: VSIn) -> VSOut {
   return out;
 }
 
-fn surfaceNormal(xz: vec2f, dist: f32, eta: f32) -> vec3f {
+fn surfaceNormal(xz: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
   var dPx = vec3f(1.0, 0.0, 0.0);
   var dPz = vec3f(0.0, 0.0, 1.0);
   for (var i = 0; i < i32(u.numLayers); i++) {
@@ -68,7 +78,7 @@ fn surfaceNormal(xz: vec2f, dist: f32, eta: f32) -> vec3f {
     let s = textureSample(waveTex, samp, layerUV(xz, i));
     let duvdx = vec2f(dir.x, -dir.y) * invL;
     let duvdz = vec2f(dir.y, dir.x) * invL;
-    let grad = vec2f(s.z, s.w) * u.hGrad;
+    let grad = vec2f(s.z, s.w) * (u.hGrad * hScale);
     // D is the x-cumsum of h with sign and scale baked into dGrad, so ∂D/∂u = h * dGrad
     let dDdu = u.choppiness * amp * s.x * u.dGrad;
     dPx += vec3f(dir.x * dDdu * duvdx.x, amp * dot(grad, duvdx), dir.y * dDdu * duvdx.x);
@@ -118,7 +128,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     discard;
   }
   let dist = distance(u.cameraPos, in.world);
-  var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0));
+  var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ));
   let sb = simBlend(in.gridXZ);
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
