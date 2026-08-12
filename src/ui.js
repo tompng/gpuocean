@@ -10,7 +10,7 @@ export function setupUI() {
     input.addEventListener('input', update)
     update()
   }
-  for (const id of ['pause', 'simDebug', 'wireframe']) {
+  for (const id of ['pause', 'wireframe']) {
     const box = document.getElementById(id)
     params[id] = false
     box.addEventListener('change', () => { params[id] = box.checked })

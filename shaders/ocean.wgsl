@@ -129,7 +129,6 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   }
   let dist = distance(u.cameraPos, in.world);
   var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ));
-  let sb = simBlend(in.gridXZ);
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
   // which otherwise keeps fresnel and ripple glints alive landward of the film
@@ -183,9 +182,6 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamAcc.r));
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
-  if (u.simDebug > 0.5) {
-    color = mix(color, vec3f(1.0, 0.05, 0.05), 0.3 * sb);
-  }
   let fog = 1.0 - exp(-dist * 3e-5);
   color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
   color = 1.0 - exp(-1.8 * color);

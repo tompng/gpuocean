@@ -192,7 +192,6 @@ export class Ocean {
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
     u[163] = params.shore - 10
-    u[164] = params.simDebug ? 1 : 0
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

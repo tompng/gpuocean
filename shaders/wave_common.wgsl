@@ -44,10 +44,10 @@ struct Uniforms {
   simDt: f32,
   waveK: f32,
   simX0: f32,
-  simDebug: f32,
   cPad0: f32,
   cPad1: f32,
   cPad2: f32,
+  cPad3: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
