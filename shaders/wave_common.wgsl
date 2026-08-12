@@ -41,9 +41,13 @@ struct Uniforms {
   shoreX: f32,
   slope: f32,
   foamDecaySwallow: f32,
-  swPad0: f32,
-  swPad1: f32,
-  swPad2: f32,
+  simDt: f32,
+  waveK: f32,
+  simX0: f32,
+  simDebug: f32,
+  cPad0: f32,
+  cPad1: f32,
+  cPad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -62,14 +66,33 @@ fn terrainHeight(xz: vec2f) -> f32 {
   return min(max(u.slope * (xz.x - u.shoreX), -u.seaDepth), 3.0);
 }
 
-// Per-column swash state from the CPU simulation:
-// x: film tip position, y: tip velocity, z: collision burst, w: wave waterline
-@group(0) @binding(7) var swashTex: texture_2d<f32>;
+// Heightless film chain state, indexed by MATERIAL position: x = horizontal
+// displacement, y = velocity, z = column tip x (world), w = wave edge x (world)
+@group(0) @binding(7) var simTex: texture_2d<f32>;
 
-fn swashState(z: f32) -> vec4f {
-  let n = i32(textureDimensions(swashTex).x);
-  let fz = clamp((z / (2.0 * u.foamRegion) + 0.5) * f32(n) - 0.5, 0.0, f32(n) - 1.0);
-  let i0 = i32(floor(fz));
-  let i1 = min(i0 + 1, n - 1);
-  return mix(textureLoad(swashTex, vec2i(i0, 0), 0), textureLoad(swashTex, vec2i(i1, 0), 0), fz - floor(fz));
+const SIM_NODES: i32 = 64;
+const SIM_COLS: i32 = 256;
+const SIM_SPAN: f32 = 24.0;
+
+fn simState(xz: vec2f) -> vec4f {
+  let fx = clamp((xz.x - u.simX0) / (SIM_SPAN / f32(SIM_NODES - 1)), 0.0, f32(SIM_NODES - 1));
+  let fz = clamp((xz.y / (2.0 * u.foamRegion) + 0.5) * f32(SIM_COLS - 1), 0.0, f32(SIM_COLS - 1));
+  let i0 = i32(floor(fx));
+  let i1 = min(i0 + 1, SIM_NODES - 1);
+  let j0 = i32(floor(fz));
+  let j1 = min(j0 + 1, SIM_COLS - 1);
+  let a = fx - floor(fx);
+  let b = fz - floor(fz);
+  return mix(
+    mix(textureLoad(simTex, vec2i(i0, j0), 0), textureLoad(simTex, vec2i(i1, j0), 0), a),
+    mix(textureLoad(simTex, vec2i(i0, j1), 0), textureLoad(simTex, vec2i(i1, j1), 0), a), b);
+}
+
+// Where the chain owns the surface: ramping in across the driven band,
+// fading at the alongshore edges. No landward fade — the last node must
+// keep its full displacement so the discarded-region boundary is exactly
+// the tip polyline (everything past the material domain end is discarded)
+fn simBlend(xz: vec2f) -> f32 {
+  return smoothstep(u.simX0 + 1.0, u.simX0 + 5.0, xz.x)
+    * (1.0 - smoothstep(u.foamRegion - 8.0, u.foamRegion - 1.0, abs(xz.y)));
 }

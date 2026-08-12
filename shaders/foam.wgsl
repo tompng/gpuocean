@@ -59,21 +59,25 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let s = waveSurface(xz);
   let jac = s.x;
   let ty = terrainHeight(xz);
-  // Depth-induced breaking (crest height vs local depth) in the surf zone,
-  // and deposition along the sweeping runup line on the beach face
+  let sb = simBlend(xz);
+  // The ghost wave field extends over dry land; only actually submerged
+  // spots may generate breaking foam
+  let waterGate = smoothstep(0.0, 0.3, s.y - ty);
   let dNow = max(-ty, 0.05);
-  let genSurf = smoothstep(0.55, 0.9, s.y / dNow) * smoothstep(0.0, 0.5, dNow);
-  // Dense foam right at the advancing film tip (uprush only, none while
-  // retreating), plus a wider burst where a wave caught the backwash
-  let sw = swashState(xz.y);
-  let up = clamp(sw.y * 0.8, 0.0, 1.0);
-  let dTip = abs(xz.x - sw.x);
-  let genTip = (0.9 * smoothstep(0.8, 0.1, dTip) + 0.3 * smoothstep(2.5, 0.3, dTip)) * up;
-  let genBurst = min(sw.z, 1.0) * smoothstep(2.5, 0.4, dTip);
-  let genR = max(max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac), genSurf), genTip), genBurst);
-  let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac), max(genSurf, genBurst));
-  // Foam deposited on the beach is swallowed by the next wave, not carried
-  let swallowed = smoothstep(0.3, -0.7, xz.x - sw.w) * smoothstep(-1.2, -0.3, ty);
+  let genSurf = smoothstep(0.55, 0.9, s.y / dNow) * smoothstep(0.0, 0.5, dNow) * waterGate;
+  // Film chain: foam where the chain compresses (a bore running through the
+  // film) and under fast sheets, only seaward of the tip. No advection
+  // needed — foam is material-anchored and the mesh moves with the chain
+  let sim = simState(xz);
+  let e = 0.8;
+  let compress = (simState(xz - vec2f(e, 0.0)).x - simState(xz + vec2f(e, 0.0)).x) / (2.0 * e);
+  let worldX = xz.x + sim.x;
+  let inFilm = sb * (1.0 - smoothstep(sim.z - 0.3, sim.z + 0.1, worldX));
+  let genSim = inFilm * max(smoothstep(0.2, 0.5, compress), 0.7 * smoothstep(1.2, 2.4, abs(sim.y)));
+  let genR = max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac) * waterGate, genSurf), genSim);
+  let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac) * waterGate, max(genSurf, genSim));
+  // Foam on the beach face is swallowed where the waves flood over it again
+  let swallowed = sb * smoothstep(0.3, -0.7, worldX - sim.w) * smoothstep(-1.2, -0.3, ty);
   let decayR = mix(u.foamDecay, u.foamDecaySwallow, swallowed);
   let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);
   let smoothR = mix(genR, prev.b, u.foamRise);

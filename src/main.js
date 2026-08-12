@@ -3,7 +3,7 @@ import { generateGravityNoiseTexture, generateCapillaryNoiseTexture, generateFoa
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { FoamSim } from './foam.js'
-import { SwashSim, sampleWaveHeight } from './swash.js'
+import { ChainSim, sampleWaveHeight } from './chain.js'
 import { Sky } from './sky.js'
 import { OrbitCamera } from './camera.js'
 import { invert } from './mat4.js'
@@ -27,9 +27,9 @@ async function main() {
   const capField = new WaveField(device, waveFieldCode, mipCode, capNoise)
   const foamPattern = generateFoamPatternTexture(device)
   const foam = new FoamSim(device, waveCommonCode + foamCode)
-  const swash = new SwashSim(device)
-  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, foamPattern, swash.view, format)
-  foam.bind(ocean.uniform, waveField.texture, swash.view)
+  const chain = new ChainSim(device)
+  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, foamPattern, chain.view, format)
+  foam.bind(ocean.uniform, waveField.texture, chain.view)
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
@@ -78,7 +78,7 @@ async function main() {
     const capK = 2 * Math.PI / params.rippleScale
     const capSpeed = Math.sqrt(GRAVITY / capK + CAPILLARY_SIGMA_RHO * capK)
     capField.update(waveDt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
-    swash.update(waveDt, params, 80, (x, z) => sampleWaveHeight(x, z, noise, waveField, ocean.layerCache))
+    chain.update(waveDt, params, 80, (x, z) => sampleWaveHeight(x, z, noise, waveField, ocean.layerCache))
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)

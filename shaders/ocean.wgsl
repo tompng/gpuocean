@@ -33,16 +33,23 @@ fn vs(in: VSIn) -> VSOut {
   // front-face compression
   let eta = max(height * u.ampInv, 0.0);
   disp += vec2f(u.leanX, u.leanY) * (eta * eta / (1.0 + eta) / u.ampInv);
+  // Horizontal orbital displacement with shallow amplification (≈ 1/tanh(kd)),
+  // fading through the waterline band and gone where the sim owns the surface
+  let ty0 = terrainHeight(xz);
+  let d0 = -ty0;
+  let sb = simBlend(xz);
+  let wSea = 1.0 - smoothstep(-0.6, 0.1, ty0);
+  let shallowAmp = clamp(1.0 / tanh(u.waveK * max(d0, 0.05)), 1.0, 2.5);
+  // In the chain strip the material displacement comes from the simulated
+  // nodes, so foam anchored to material coordinates rides the flow
+  let chain = simState(xz);
+  disp = disp * shallowAmp * wSea * (1.0 - sb) + vec2f(chain.x, 0.0) * sb;
   let dispXZ = xz + disp;
   // Smooth clamp: full wave motion everywhere, but the surface never sinks
   // below the sand (kept a hair above so the wetted film stays visible)
   let ty = terrainHeight(dispXZ);
   let dy = height - (ty + 0.01);
-  var y = ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
-  // Thin swash film from the wave's own waterline out to the simulated tip;
-  // offshore the max() is inert since the wave surface stands far above it
-  let sw = swashState(xz.y);
-  y = max(y, ty + 0.01 + 0.04 * smoothstep(sw.x + 0.1, sw.x - 0.8, xz.x));
+  let y = ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
@@ -103,11 +110,21 @@ fn surfaceNormal(xz: vec2f, dist: f32, eta: f32) -> vec3f {
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
+  // Nothing exists landward of the waterline tip (land gets its own mesh
+  // eventually). The cut is in MATERIAL coordinates at the chain's last
+  // node line, so the visible boundary is the displaced tip polyline
+  // itself, not a world-space iso-line crossing the mesh diagonally
+  if (in.gridXZ.x > u.simX0 + SIM_SPAN) {
+    discard;
+  }
   let dist = distance(u.cameraPos, in.world);
   var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0));
+  let sb = simBlend(in.gridXZ);
   let ty = terrainHeight(in.world.xz);
+  // The lower edge sits above the residual softmax offset left on dry sand,
+  // which otherwise keeps fresnel and ripple glints alive landward of the film
   let column = max(in.world.y - ty, 0.0);
-  let waterM = smoothstep(0.0, 0.05, column);
+  let waterM = smoothstep(0.025, 0.09, column);
   n = normalize(mix(normalize(vec3f(-u.slope, 1.0, 0.0)), n, waterM));
   let v = normalize(u.cameraPos - in.world);
   if (dot(n, v) < 0.0) { n = -n; }
@@ -134,7 +151,9 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let cs = textureSample(capTex, samp, bottomXZ / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
          + textureSample(capTex, samp, bottomXZ / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
   let web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
-  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * waterM;
+  // Caustics need some water column to focus in; a centimeters-thin film
+  // (or the residual softmax offset on dry sand) must not carry the web
+  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * smoothstep(0.04, 0.25, column);
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
   let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
   // Direct sunlight in the water column fades as the sun drops; the floor
@@ -154,6 +173,9 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamAcc.r));
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
+  if (u.simDebug > 0.5) {
+    color = mix(color, vec3f(1.0, 0.05, 0.05), 0.3 * sb);
+  }
   let fog = 1.0 - exp(-dist * 3e-5);
   color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
   color = 1.0 - exp(-1.8 * color);
@@ -162,5 +184,8 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
 @fragment
 fn fs_wire(in: VSOut) -> @location(0) vec4f {
+  if (in.gridXZ.x > u.simX0 + SIM_SPAN) {
+    discard;
+  }
   return vec4f(0.15, 0.85, 0.5, 1.0);
 }

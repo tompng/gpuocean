@@ -29,7 +29,7 @@ const FOAM_REGION = 80
 const FOAM_RISE = 0.08
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, swashView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, simView, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -62,7 +62,7 @@ export class Ocean {
     })
 
     this.uniform = device.createBuffer({
-      size: 656,
+      size: 672,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -86,13 +86,13 @@ export class Ocean {
         ...entries,
         { binding: 4, resource: view },
         { binding: 5, resource: patternView },
-        { binding: 7, resource: swashView },
+        { binding: 7, resource: simView },
       ],
     }))
     // fs_wire samples no textures, so the wire layout only holds the vertex-stage bindings
     this.wireBindGroup = device.createBindGroup({
       layout: this.wirePipeline.getBindGroupLayout(0),
-      entries: [...entries.slice(0, 3), { binding: 7, resource: swashView }],
+      entries: [...entries.slice(0, 3), { binding: 7, resource: simView }],
     })
 
     const [tri, line] = buildIndices(this.gridN)
@@ -105,7 +105,7 @@ export class Ocean {
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
-    this.uniformData = new Float32Array(164)
+    this.uniformData = new Float32Array(168)
     this.layerCache = []
   }
 
@@ -189,6 +189,10 @@ export class Ocean {
     u[158] = params.shore
     u[159] = params.slope
     u[160] = Math.exp(-dt / 0.5)
+    u[161] = Math.min(dt, 0.033)
+    u[162] = 2 * Math.PI / params.wavelength
+    u[163] = params.shore - 10
+    u[164] = params.simDebug ? 1 : 0
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
