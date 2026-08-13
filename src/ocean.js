@@ -27,6 +27,10 @@ const CAP_UV_OFFSETS = [
 ]
 // Half-extent of the foam accumulation buffer around the origin [m]
 const FOAM_REGION = 80
+// Shore ribbon: vertex x is normalized over the ribbon band, whose material
+// width must match SIM_SPAN + SIM_BAND in wave_common.wgsl
+const RIBBON_SPAN = 28
+const RIBBON_CELLS = 140
 // Rise time of foam generation, roughly the crest's texel-crossing time [s]
 const FOAM_RISE = 0.08
 
@@ -36,32 +40,46 @@ export class Ocean {
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
     const module = device.createShaderModule({ code })
+    // The grid and ribbon pipelines share one explicit layout so a single
+    // bind group works across all of them ('auto' layouts are pipeline-bound)
+    const bindLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: {} },
+        { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 7, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
+      ],
+    })
     const base = {
-      layout: 'auto',
-      vertex: {
-        module,
-        entryPoint: 'vs',
-        buffers: [{
-          arrayStride: 12,
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: 'float32x2' },
-            { shaderLocation: 1, offset: 8, format: 'float32' },
-          ],
-        }],
-      },
+      layout: device.createPipelineLayout({ bindGroupLayouts: [bindLayout] }),
       multisample: { count: sampleCount },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     }
-    this.fillPipeline = device.createRenderPipeline({
-      ...base,
-      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
-      primitive: { topology: 'triangle-list' },
+    const vertex = entryPoint => ({
+      module,
+      entryPoint,
+      buffers: [{
+        arrayStride: 12,
+        attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x2' },
+          { shaderLocation: 1, offset: 8, format: 'float32' },
+        ],
+      }],
     })
-    this.wirePipeline = device.createRenderPipeline({
+    const makePipeline = (vsEntry, fsEntry, topology) => device.createRenderPipeline({
       ...base,
-      fragment: { module, entryPoint: 'fs_wire', targets: [{ format }] },
-      primitive: { topology: 'line-list' },
+      vertex: vertex(vsEntry),
+      fragment: { module, entryPoint: fsEntry, targets: [{ format }] },
+      primitive: { topology },
     })
+    this.fillGridPipeline = makePipeline('vs_grid', 'fs', 'triangle-list')
+    this.fillRibbonPipeline = makePipeline('vs', 'fs', 'triangle-list')
+    this.wireGridPipeline = makePipeline('vs_grid', 'fs_wire', 'line-list')
+    this.wireRibbonPipeline = makePipeline('vs', 'fs_wire', 'line-list')
+    this.bindLayout = bindLayout
 
     this.uniform = device.createBuffer({
       size: 672,
@@ -82,8 +100,8 @@ export class Ocean {
     ]
     // One bind group per foam ping-pong texture
     const patternView = foamPattern.texture.createView()
-    this.fillBindGroups = foamViews.map(view => device.createBindGroup({
-      layout: this.fillPipeline.getBindGroupLayout(0),
+    this.bindGroups = foamViews.map(view => device.createBindGroup({
+      layout: this.bindLayout,
       entries: [
         ...entries,
         { binding: 4, resource: view },
@@ -91,18 +109,20 @@ export class Ocean {
         { binding: 7, resource: simView },
       ],
     }))
-    // fs_wire samples no textures, so the wire layout only holds the vertex-stage bindings
-    this.wireBindGroup = device.createBindGroup({
-      layout: this.wirePipeline.getBindGroupLayout(0),
-      entries: [...entries.slice(0, 3), { binding: 7, resource: simView }],
-    })
 
-    const [tri, line] = buildIndices(this.gridN)
+    const [tri, line] = buildIndices(this.gridN, this.gridN)
     this.triIndices = createIndexBuffer(device, tri)
     this.lineIndices = createIndexBuffer(device, line)
     this.triCount = tri.length
     this.lineCount = line.length
     this.vertexBuffer = createVertexBuffer(device, buildVertices(this.gridN))
+
+    const [ribTri, ribLine] = buildIndices(RIBBON_CELLS, this.gridN)
+    this.ribbonTriIndices = createIndexBuffer(device, ribTri)
+    this.ribbonLineIndices = createIndexBuffer(device, ribLine)
+    this.ribbonTriCount = ribTri.length
+    this.ribbonLineCount = ribLine.length
+    this.ribbonVertexBuffer = createVertexBuffer(device, buildRibbonVertices(RIBBON_CELLS, this.gridN))
 
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
@@ -196,11 +216,16 @@ export class Ocean {
     u[163] = params.shore - REST_DEPTH / params.slope
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
-    pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)
-    pass.setBindGroup(0, params.wireframe ? this.wireBindGroup : this.fillBindGroups[foamIndex])
+    const wire = params.wireframe
+    pass.setBindGroup(0, this.bindGroups[foamIndex])
+    pass.setPipeline(wire ? this.wireGridPipeline : this.fillGridPipeline)
     pass.setVertexBuffer(0, this.vertexBuffer)
-    pass.setIndexBuffer(params.wireframe ? this.lineIndices : this.triIndices, 'uint32')
-    pass.drawIndexed(params.wireframe ? this.lineCount : this.triCount)
+    pass.setIndexBuffer(wire ? this.lineIndices : this.triIndices, 'uint32')
+    pass.drawIndexed(wire ? this.lineCount : this.triCount)
+    pass.setPipeline(wire ? this.wireRibbonPipeline : this.fillRibbonPipeline)
+    pass.setVertexBuffer(0, this.ribbonVertexBuffer)
+    pass.setIndexBuffer(wire ? this.ribbonLineIndices : this.ribbonTriIndices, 'uint32')
+    pass.drawIndexed(wire ? this.ribbonLineCount : this.ribbonTriCount)
   }
 }
 
@@ -231,6 +256,28 @@ function buildVertices(n) {
   return data
 }
 
+// The ribbon is uniform in normalized x across its band and reuses the
+// grid's warped axis along z, so the shoreline stays fine near the camera
+// and coarsens toward the horizon
+function buildRibbonVertices(nx, nz) {
+  const half = nz / 2
+  const cellAt = i => {
+    const a = Math.min(Math.abs(i - half), half - 1)
+    return warpAxis(a + 1) - warpAxis(a)
+  }
+  const dxMaterial = RIBBON_SPAN / nx
+  const data = new Float32Array((nx + 1) * (nz + 1) * 3)
+  let p = 0
+  for (let iz = 0; iz <= nz; iz++) {
+    for (let ix = 0; ix <= nx; ix++) {
+      data[p++] = ix / nx
+      data[p++] = warpAxis(iz - half)
+      data[p++] = Math.max(dxMaterial, cellAt(iz))
+    }
+  }
+  return data
+}
+
 function createVertexBuffer(device, data) {
   const buffer = device.createBuffer({
     size: data.byteLength,
@@ -242,31 +289,31 @@ function createVertexBuffer(device, data) {
   return buffer
 }
 
-function buildIndices(n) {
-  const tri = new Uint32Array(n * n * 6)
+function buildIndices(nx, nz) {
+  const tri = new Uint32Array(nx * nz * 6)
   let t = 0
-  for (let z = 0; z < n; z++) {
-    for (let x = 0; x < n; x++) {
-      const a = z * (n + 1) + x
+  for (let z = 0; z < nz; z++) {
+    for (let x = 0; x < nx; x++) {
+      const a = z * (nx + 1) + x
       const b = a + 1
-      const c = a + n + 1
+      const c = a + nx + 1
       const d = c + 1
       tri[t++] = a; tri[t++] = c; tri[t++] = b
       tri[t++] = b; tri[t++] = c; tri[t++] = d
     }
   }
-  const line = new Uint32Array(4 * n * (n + 1))
+  const line = new Uint32Array(2 * (nx * (nz + 1) + nz * (nx + 1)))
   let l = 0
-  for (let z = 0; z <= n; z++) {
-    for (let x = 0; x < n; x++) {
-      const a = z * (n + 1) + x
+  for (let z = 0; z <= nz; z++) {
+    for (let x = 0; x < nx; x++) {
+      const a = z * (nx + 1) + x
       line[l++] = a; line[l++] = a + 1
     }
   }
-  for (let x = 0; x <= n; x++) {
-    for (let z = 0; z < n; z++) {
-      const a = z * (n + 1) + x
-      line[l++] = a; line[l++] = a + n + 1
+  for (let x = 0; x <= nx; x++) {
+    for (let z = 0; z < nz; z++) {
+      const a = z * (nx + 1) + x
+      line[l++] = a; line[l++] = a + nx + 1
     }
   }
   return [tri, line]

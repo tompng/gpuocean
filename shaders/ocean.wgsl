@@ -6,6 +6,9 @@ struct VSOut {
   @builtin(position) clip: vec4f,
   @location(0) gridXZ: vec2f,
   @location(1) world: vec3f,
+  // fragments with cut > 0 are discarded: the grid mesh ends just past the
+  // junction, hidden under the shore ribbon's overlap
+  @location(2) cut: f32,
 }
 
 struct VSIn {
@@ -13,16 +16,19 @@ struct VSIn {
   @location(1) cell: f32,
 }
 
-@vertex
-fn vs(in: VSIn) -> VSOut {
-  let xz = in.pos;
+struct WaveSample {
+  height: f32,
+  disp: vec2f,
+}
+
+fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
   var height = 0.0;
   var disp = vec2f(0.0);
   for (var i = 0; i < i32(u.numLayers); i++) {
     let l = u.layers[i];
     // Coarse cells sample a mip matching their footprint, so distant waves
     // average toward zero instead of aliasing vertex heights
-    let lod = clamp(log2(max(in.cell * l.dirScaleAmp.z * u.hGrad, 1.0)), 0.0, 9.0);
+    let lod = clamp(log2(max(cell * l.dirScaleAmp.z * u.hGrad, 1.0)), 0.0, 9.0);
     let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), lod);
     height += l.dirScaleAmp.w * s.x;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y) * l.dirScaleAmp.xy;
@@ -35,24 +41,57 @@ fn vs(in: VSIn) -> VSOut {
   let eta = max(height * u.ampInv, 0.0);
   disp += vec2f(u.leanX, u.leanY) * (eta * eta / (1.0 + eta) / u.ampInv);
   // Horizontal orbital displacement with shallow amplification (≈ 1/tanh(kd)),
-  // fading through the waterline band and gone where the sim owns the surface
+  // fading through the waterline band
   let ty0 = terrainHeight(xz);
-  let d0 = -ty0;
-  let sb = simBlend(xz);
   let wSea = 1.0 - smoothstep(-0.6, 0.1, ty0);
-  let shallowAmp = clamp(1.0 / tanh(u.waveK * max(d0, 0.05)), 1.0, 2.5);
+  let shallowAmp = clamp(1.0 / tanh(u.waveK * max(-ty0, 0.05)), 1.0, 2.5);
+  return WaveSample(height, disp * shallowAmp * wSea);
+}
+
+fn softClamp(height: f32, ty: f32) -> f32 {
+  // full wave motion, but the surface never sinks below the sand (kept a
+  // hair above so the wetted film stays visible)
+  let dy = height - (ty + 0.01);
+  return ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
+}
+
+// Open-ocean grid: pure scroll waves. Across the shore ribbon's seaward
+// band it dives below the sand and is cut just past the junction, so the
+// ribbon always covers it; at the band's seaward edge both meshes evaluate
+// the same surface, so the overlap seam has matching shape and color.
+@vertex
+fn vs_grid(in: VSIn) -> VSOut {
+  let xz = in.pos;
+  let w = sampleWaves(xz, in.cell);
+  let dispXZ = xz + w.disp;
+  let ty = terrainHeight(dispXZ);
+  var y = softClamp(w.height, ty);
+  y -= 1.5 * smoothstep(u.simX0 - SIM_BAND, u.simX0, xz.x);
+  var out: VSOut;
+  out.world = vec3f(dispXZ.x, y, dispXZ.y);
+  out.gridXZ = xz;
+  out.cut = xz.x - u.simX0;
+  out.clip = u.viewProj * vec4f(out.world, 1.0);
+  return out;
+}
+
+// Shore ribbon: covers the junction band and the film, ending exactly at
+// the chain's material domain end (the waterline tip), so nothing renders
+// landward of the tip. Vertex x is normalized over the ribbon's band.
+@vertex
+fn vs(in: VSIn) -> VSOut {
+  let xz = vec2f(u.simX0 - SIM_BAND + in.pos.x * (SIM_SPAN + SIM_BAND), in.pos.y);
+  let w = sampleWaves(xz, in.cell);
+  let sb = simBlend(xz);
   // In the chain strip the material displacement comes from the simulated
   // nodes (rest-state compression plus the stored deviation), so foam
   // anchored to material coordinates rides the flow
   let chain = simState(xz);
   let chainDx = simRestX(xz.x) - xz.x + chain.x;
-  disp = disp * shallowAmp * wSea * (1.0 - sb) + vec2f(chainDx, 0.0) * sb;
+  let disp = w.disp * (1.0 - sb) + vec2f(chainDx, 0.0) * sb;
   let dispXZ = xz + disp;
-  // Smooth clamp: full wave motion everywhere, but the surface never sinks
-  // below the sand (kept a hair above so the wetted film stays visible)
   let ty = terrainHeight(dispXZ);
-  let dy = height - (ty + 0.01);
-  let yWave = ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
+  let yWave = softClamp(w.height, ty);
   // Film thickness tapers from the junction's actual water column (so the
   // seaward edge meets the wave surface) to zero at the tip; at rest the
   // column is REST_DEPTH and terrain + thickness cancels to the flat sea.
@@ -67,6 +106,7 @@ fn vs(in: VSIn) -> VSOut {
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
+  out.cut = -1.0;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -128,11 +168,7 @@ fn surfaceNormal(xz: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
-  // Nothing exists landward of the waterline tip (land gets its own mesh
-  // eventually). The cut is in MATERIAL coordinates at the chain's last
-  // node line, so the visible boundary is the displaced tip polyline
-  // itself, not a world-space iso-line crossing the mesh diagonally
-  if (in.gridXZ.x > u.simX0 + SIM_SPAN) {
+  if (in.cut > 0.0) {
     discard;
   }
   let dist = distance(u.cameraPos, in.world);
@@ -198,7 +234,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
 @fragment
 fn fs_wire(in: VSOut) -> @location(0) vec4f {
-  if (in.gridXZ.x > u.simX0 + SIM_SPAN) {
+  if (in.cut > 0.0) {
     discard;
   }
   return vec4f(0.15, 0.85, 0.5, 1.0);

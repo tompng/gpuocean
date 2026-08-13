@@ -76,6 +76,9 @@ fn terrainHeight(xz: vec2f) -> f32 {
 const SIM_NODES: i32 = 64;
 const SIM_COLS: i32 = 256;
 const SIM_SPAN: f32 = 24.0;
+// Seaward width of the wave-to-film handover band (also the shore ribbon's
+// seaward margin and the open-ocean grid's dive-under ramp)
+const SIM_BAND: f32 = 4.0;
 // Junction depth: waves hand over to the film at this isobath, and the film
 // thickness runs from this value at the junction to zero at the tip, exactly
 // canceling the terrain rise so the resting film is the flat sea surface
@@ -119,6 +122,6 @@ fn simState(xz: vec2f) -> vec4f {
 // fade: the last node keeps its full displacement so the discarded-region
 // boundary is exactly the tip polyline.
 fn simBlend(xz: vec2f) -> f32 {
-  return smoothstep(u.simX0 - 4.0, u.simX0, xz.x)
+  return smoothstep(u.simX0 - SIM_BAND, u.simX0, xz.x)
     * (1.0 - smoothstep(u.foamRegion - 8.0, u.foamRegion - 1.0, abs(xz.y)));
 }
