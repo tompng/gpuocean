@@ -179,7 +179,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     discard;
   }
   let dist = distance(u.cameraPos, in.world);
-  var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ));
+  let sbF = simBlend(in.gridXZ);
+  // Gravity-wave normal detail follows the geometry, whose height dies
+  // across the handover band; sampled in the film's compressed material it
+  // would otherwise keep painting shading bumps onto the flat sheet
+  var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ) * (1.0 - sbF));
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
   // which otherwise keeps fresnel and ripple glints alive landward of the film
@@ -199,7 +203,6 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // too thin to hold a submerged bubble cloud, so the glow fades out there
   // and its foam reads as surface foam only
   let towardSun = max(0.0, -dot(v, u.sunDir));
-  let sbF = simBlend(in.gridXZ);
   let sss = u.sssStrength * (0.55 + 0.45 * towardSun * towardSun) * foamAcc.g * (1.0 - sbF);
   // Flat sand bottom seen through the refracted view ray with per-channel
   // Beer-Lambert extinction; +1.4 is the sun-side path per meter of column
