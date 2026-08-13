@@ -65,7 +65,10 @@ fn vs_grid(in: VSIn) -> VSOut {
   let w = sampleWaves(xz, in.cell);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
-  var y = softClamp(w.height, ty);
+  // The same height ramp as the ribbon's wave side, so the two surfaces
+  // agree inside the overlap band — otherwise a tall crest on the grid
+  // can outrun the dive-under margin and poke through the ribbon
+  var y = softClamp(w.height * (1.0 - simBlend(xz)), ty);
   y -= 1.5 * smoothstep(u.simX0 - SIM_BAND, u.simX0, xz.x);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
