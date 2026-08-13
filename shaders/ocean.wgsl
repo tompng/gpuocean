@@ -192,19 +192,27 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let edgeFade = 1.0 - smoothstep(0.85, 1.0, max(abs(in.gridXZ.x), abs(in.gridXZ.y)) / u.foamRegion);
   let foamAcc = textureSample(foamTex, samp, fuv).rg * edgeFade;
   // Bubble clouds scatter multiply and emerge nearly isotropic (white water);
-  // a mild forward lobe remains for thin backlit crests
+  // a mild forward lobe remains for thin backlit crests. The film is a sheet
+  // too thin to hold a submerged bubble cloud, so the glow fades out there
+  // and its foam reads as surface foam only
   let towardSun = max(0.0, -dot(v, u.sunDir));
-  let sss = u.sssStrength * (0.55 + 0.45 * towardSun * towardSun) * foamAcc.g;
+  let sbF = simBlend(in.gridXZ);
+  let sss = u.sssStrength * (0.55 + 0.45 * towardSun * towardSun) * foamAcc.g * (1.0 - sbF);
   // Flat sand bottom seen through the refracted view ray with per-channel
   // Beer-Lambert extinction; +1.4 is the sun-side path per meter of column
   // (refracted solar zenith ~44°)
   let refr = refract(-v, n, 0.752);
-  let pathLen = column * (1.0 / max(-refr.y, 0.05) + 1.4);
+  // The grazing-path factor assumes laterally endless water; a grazing ray
+  // through the film (e.g. down a bore front) exits the thin sheet almost
+  // immediately, so cap its underwater path or the film's edge renders as
+  // if seen through meters of water
+  let lateral = mix(1.0 / max(-refr.y, 0.05), min(1.0 / max(-refr.y, 0.05), 2.0), sbF);
+  let pathLen = column * (lateral + 1.4);
   let trans = exp(-vec3f(0.25, 0.04, 0.02) * pathLen);
   // Caustic web on the sand: bright filaments along the zero-crossing lines of
   // two drifting noise fields, sampled at the refracted bottom point so the
   // pattern swims with the surface; defocus fades it with column depth
-  let bottomXZ = in.world.xz + refr.xz * (column / max(-refr.y, 0.05));
+  let bottomXZ = in.world.xz + refr.xz * (column * lateral);
   let cs = textureSample(capTex, samp, bottomXZ / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
          + textureSample(capTex, samp, bottomXZ / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
   let web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);

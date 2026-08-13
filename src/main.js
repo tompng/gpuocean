@@ -83,7 +83,10 @@ async function main() {
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)
-    foam.render(encoder)
+    // While paused the decay factors are exp(0) = 1 but generation would
+    // keep running against the frozen sim state and pump the accumulation
+    // to saturation, so freeze the foam buffer entirely
+    if (waveDt > 0) foam.render(encoder)
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
         view: msaa.createView(),
