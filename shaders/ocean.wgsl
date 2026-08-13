@@ -118,7 +118,7 @@ fn vs(in: VSIn) -> VSOut {
   return out;
 }
 
-fn surfaceNormal(xz: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
+fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
   var dPx = vec3f(1.0, 0.0, 0.0);
   var dPz = vec3f(0.0, 0.0, 1.0);
   for (var i = 0; i < i32(u.numLayers); i++) {
@@ -145,18 +145,14 @@ fn surfaceNormal(xz: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
   let front = smoothstep(0.0, 0.15, -dPx.y);
   let squeeze = smoothstep(0.0, 0.3, 2.0 - dPx.x - dPz.z);
   let conc = front + squeeze;
-  // Ripples are sampled in material space, and the film's material is
-  // strongly compressed onto the swash zone — they would render as a dense
-  // shimmer with a hard step at the junction, so fade them out with the
-  // same ramp that hands the surface to the film
-  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0) * (1.0 - smoothstep(u.simX0 - 2.0, u.simX0, xz.x));
+  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0);
   let isoScale = mix(1.0, conc, u.rippleBias * 0.4) * fade;
   let anisoScale = mix(1.0, conc, u.rippleBias) * fade;
   for (var i = 0; i < 6; i++) {
     let l = u.capLayers[i];
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
-    let uvc = vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * invL + l.scroll.xy;
+    let uvc = vec2f(dot(rippleXZ, dir), dot(rippleXZ, vec2f(-dir.y, dir.x))) * invL + l.scroll.xy;
     var s: vec4f;
     var amp: f32;
     if (i < 3) {
@@ -182,8 +178,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let sbF = simBlend(in.gridXZ);
   // Gravity-wave normal detail follows the geometry, whose height dies
   // across the handover band; sampled in the film's compressed material it
-  // would otherwise keep painting shading bumps onto the flat sheet
-  var n = surfaceNormal(in.gridXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ) * (1.0 - sbF));
+  // would otherwise keep painting shading bumps onto the flat sheet.
+  // Ripples instead switch to WORLD-space sampling over the film — wind
+  // ripples propagate on their own rather than riding the swash flow, and
+  // material sampling would compress them onto the wedge with a step at
+  // the junction — so they survive onto the film without artifacts
+  let rippleXZ = mix(in.gridXZ, in.world.xz, sbF);
+  var n = surfaceNormal(in.gridXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ) * (1.0 - sbF));
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
   // which otherwise keeps fresnel and ripple glints alive landward of the film
