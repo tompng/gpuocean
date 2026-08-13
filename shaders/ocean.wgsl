@@ -51,8 +51,8 @@ fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
 fn softClamp(height: f32, ty: f32) -> f32 {
   // full wave motion, but the surface never sinks below the sand (kept a
   // hair above so the wetted film stays visible)
-  let dy = height - (ty + 0.01);
-  return ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
+  let dy = height - (ty + 0.1);
+  return ty + 0.1 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
 }
 
 // Open-ocean grid: pure scroll waves. Across the shore ribbon's seaward
@@ -146,7 +146,7 @@ fn surfaceNormal(xz: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
   // strongly compressed onto the swash zone — they would render as a dense
   // shimmer with a hard step at the junction, so fade them out with the
   // same ramp that hands the surface to the film
-  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0) * (1.0 - simBlend(xz));
+  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0) * (1.0 - smoothstep(u.simX0 - 2.0, u.simX0, xz.x));
   let isoScale = mix(1.0, conc, u.rippleBias * 0.4) * fade;
   let anisoScale = mix(1.0, conc, u.rippleBias) * fade;
   for (var i = 0; i < 6; i++) {
