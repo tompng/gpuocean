@@ -42,24 +42,28 @@ fn vs(in: VSIn) -> VSOut {
   let wSea = 1.0 - smoothstep(-0.6, 0.1, ty0);
   let shallowAmp = clamp(1.0 / tanh(u.waveK * max(d0, 0.05)), 1.0, 2.5);
   // In the chain strip the material displacement comes from the simulated
-  // nodes, so foam anchored to material coordinates rides the flow
+  // nodes (rest-state compression plus the stored deviation), so foam
+  // anchored to material coordinates rides the flow
   let chain = simState(xz);
-  disp = disp * shallowAmp * wSea * (1.0 - sb) + vec2f(chain.x, 0.0) * sb;
+  let chainDx = simRestX(xz.x) - xz.x + chain.x;
+  disp = disp * shallowAmp * wSea * (1.0 - sb) + vec2f(chainDx, 0.0) * sb;
   let dispXZ = xz + disp;
-  // Smooth clamp: full wave motion, but the surface never sinks below the
-  // sand. Inside the strip the floor rises to FILM_DEPTH so the wave's
-  // waterline meets the film at the same depth instead of pinching to zero
+  // Smooth clamp: full wave motion everywhere, but the surface never sinks
+  // below the sand (kept a hair above so the wetted film stays visible)
   let ty = terrainHeight(dispXZ);
-  let zb = 1.0 - smoothstep(u.foamRegion - 8.0, u.foamRegion - 1.0, abs(xz.y));
-  let floorD = mix(0.01, FILM_DEPTH, zb);
-  let dy = height - (ty + floorD);
-  let yWave = ty + floorD + 0.5 * (dy + sqrt(dy * dy + 0.0225));
-  // The film is heightless: a terrain-following sheet whose depth matches
-  // the wave at the junction and tapers to zero at the tip, with zero end
-  // slopes so neither joint shows a crease
+  let dy = height - (ty + 0.01);
+  let yWave = ty + 0.01 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
+  // Film thickness tapers from the junction's actual water column (so the
+  // seaward edge meets the wave surface) to zero at the tip; at rest the
+  // column is REST_DEPTH and terrain + thickness cancels to the flat sea.
+  // Seaward of the junction (the blend ramp) the terrain keeps dropping
+  // while the column stays at the junction value, so clamp the film's
+  // terrain at the junction's — the extrapolation is then flat at the
+  // junction's water level instead of sagging below the sea
+  let junc = u.simX0 + simState(vec2f(u.simX0, xz.y)).x;
+  let tyF = max(ty, terrainHeight(vec2f(junc, dispXZ.y)));
   let tTip = clamp((xz.x - u.simX0) / SIM_SPAN, 0.0, 1.0);
-  let filmD = FILM_DEPTH * (1.0 - tTip * tTip * (3.0 - 2.0 * tTip));
-  let y = mix(yWave, ty + filmD, sb);
+  let y = mix(yWave, tyF + chain.w * (1.0 - tTip), sb);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
@@ -94,7 +98,11 @@ fn surfaceNormal(xz: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
   let front = smoothstep(0.0, 0.15, -dPx.y);
   let squeeze = smoothstep(0.0, 0.3, 2.0 - dPx.x - dPz.z);
   let conc = front + squeeze;
-  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0);
+  // Ripples are sampled in material space, and the film's material is
+  // strongly compressed onto the swash zone — they would render as a dense
+  // shimmer with a hard step at the junction, so fade them out with the
+  // same ramp that hands the surface to the film
+  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0) * (1.0 - simBlend(xz));
   let isoScale = mix(1.0, conc, u.rippleBias * 0.4) * fade;
   let anisoScale = mix(1.0, conc, u.rippleBias) * fade;
   for (var i = 0; i < 6; i++) {

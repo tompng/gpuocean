@@ -1,3 +1,5 @@
+import { REST_DEPTH } from './chain.js'
+
 const GRAVITY = 9.81
 // σ/ρ of water [m^3/s^2] for the capillary dispersion c = sqrt(g/k + (σ/ρ)k)
 const CAPILLARY_SIGMA_RHO = 7.4e-5
@@ -191,7 +193,7 @@ export class Ocean {
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
-    u[163] = params.shore - 10
+    u[163] = params.shore - REST_DEPTH / params.slope
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     pass.setPipeline(params.wireframe ? this.wirePipeline : this.fillPipeline)

@@ -73,14 +73,18 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // needed — foam is material-anchored and the mesh moves with the chain
   let sim = simState(xz);
   let e = 0.8;
-  let compress = (simState(xz - vec2f(e, 0.0)).x - simState(xz + vec2f(e, 0.0)).x) / (2.0 * e);
-  let worldX = xz.x + sim.x;
+  // relative compression strain: the displacement deviation is on the rest
+  // wedge's scale, so normalize the material-space gradient by it
+  let restScale = REST_DEPTH / u.slope / SIM_SPAN;
+  let compress = (simState(xz - vec2f(e, 0.0)).x - simState(xz + vec2f(e, 0.0)).x) / (2.0 * e * restScale);
+  let worldX = simRestX(xz.x) + sim.x;
   let inFilm = sb * (1.0 - smoothstep(sim.z - 0.3, sim.z + 0.1, worldX));
   let genSim = inFilm * max(smoothstep(0.2, 0.5, compress), 0.7 * smoothstep(1.2, 2.4, abs(sim.y)));
   let genR = max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac) * waterGate, genSurf), genSim);
   let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac) * waterGate, max(genSurf, genSim));
   // Foam on the beach face is swallowed where the waves flood over it again
-  let swallowed = sb * smoothstep(0.3, -0.7, worldX - sim.w) * smoothstep(-1.2, -0.3, ty);
+  let junc = u.simX0 + simState(vec2f(u.simX0, xz.y)).x;
+  let swallowed = sb * smoothstep(0.3, -0.7, worldX - junc) * smoothstep(-1.2, -0.3, ty);
   let decayR = mix(u.foamDecay, u.foamDecaySwallow, swallowed);
   let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);
   let smoothR = mix(genR, prev.b, u.foamRise);

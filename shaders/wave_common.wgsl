@@ -67,15 +67,27 @@ fn terrainHeight(xz: vec2f) -> f32 {
 }
 
 // Heightless film chain state, indexed by MATERIAL position: x = horizontal
-// displacement, y = velocity, z = column tip x (world), w = wave edge x (world)
+// displacement relative to the REST state (not the material grid),
+// y = velocity, z = column tip x (world), w = water column at the junction.
+// The junction's world x is recoverable as simX0 + simState(vec2f(simX0, z)).x
+// since the first node is pinned to it.
 @group(0) @binding(7) var simTex: texture_2d<f32>;
 
 const SIM_NODES: i32 = 64;
 const SIM_COLS: i32 = 256;
 const SIM_SPAN: f32 = 24.0;
-// Water depth where the wave hands over to the film: the wave's clamp floor
-// rises to this inside the strip and the film tapers from it to zero at the tip
-const FILM_DEPTH: f32 = 0.05;
+// Junction depth: waves hand over to the film at this isobath, and the film
+// thickness runs from this value at the junction to zero at the tip, exactly
+// canceling the terrain rise so the resting film is the flat sea surface
+const REST_DEPTH: f32 = 0.25;
+
+// Material -> rest world x: the chain's material band compresses onto the
+// still-water wedge between the junction isobath and the static shoreline;
+// identity outside the band
+fn simRestX(mx: f32) -> f32 {
+  let m = clamp(mx - u.simX0, 0.0, SIM_SPAN);
+  return mx + m * (REST_DEPTH / u.slope / SIM_SPAN - 1.0);
+}
 
 // Waves flatten approaching the waterline: horizontal displacement over the
 // sloped terrain already reads as vertical motion there, and keeping the true
@@ -99,11 +111,14 @@ fn simState(xz: vec2f) -> vec4f {
     mix(textureLoad(simTex, vec2i(i0, j1), 0), textureLoad(simTex, vec2i(i1, j1), 0), a), b);
 }
 
-// Where the chain owns the surface: ramping in across the driven band,
-// fading at the alongshore edges. No landward fade — the last node must
-// keep its full displacement so the discarded-region boundary is exactly
-// the tip polyline (everything past the material domain end is discarded)
+// Where the chain owns the surface, fading at the alongshore edges. The
+// ramp sits SEAWARD of the junction, where the film mapping extrapolates
+// as identity plus the driven displacement and so nearly agrees with the
+// wave mapping — ramping inside the film would mix the identity mapping
+// with the rest-compressed one and fold the mesh over itself. No landward
+// fade: the last node keeps its full displacement so the discarded-region
+// boundary is exactly the tip polyline.
 fn simBlend(xz: vec2f) -> f32 {
-  return smoothstep(u.simX0 + 1.0, u.simX0 + 5.0, xz.x)
+  return smoothstep(u.simX0 - 4.0, u.simX0, xz.x)
     * (1.0 - smoothstep(u.foamRegion - 8.0, u.foamRegion - 1.0, abs(xz.y)));
 }
