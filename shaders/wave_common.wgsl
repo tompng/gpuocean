@@ -68,7 +68,7 @@ fn terrainHeight(xz: vec2f) -> f32 {
 
 // Heightless film chain state, indexed by MATERIAL position: x = horizontal
 // displacement relative to the REST state (not the material grid),
-// y = velocity, z = column tip x (world), w = water column at the junction.
+// y = velocity, z = column tip x (world), w = unused.
 // The junction's world x is recoverable as simX0 + simState(vec2f(simX0, z)).x
 // since the first node is pinned to it.
 @group(0) @binding(7) var simTex: texture_2d<f32>;

@@ -33,7 +33,6 @@ export class ChainSim {
     this.vol = new Float32Array(NODES - 1)
     this.eta = new Float32Array(NODES - 1)
     this.drive = new Float32Array(COLS)
-    this.hJunc = new Float32Array(COLS)
     this.prevXi = new Float32Array(COLS)
     this.ve = new Float32Array(COLS)
     this.key = ''
@@ -57,30 +56,23 @@ export class ChainSim {
     }
     this.u.fill(0)
     this.drive.fill(this.xb)
-    this.hJunc.fill(REST_DEPTH)
     this.prevXi.fill(0)
     this.ve.fill(0)
   }
 
-  update(dt, params, region, sampleDispX, sampleHeight) {
+  update(dt, params, region, sampleDispX) {
     const key = `${params.shore}|${params.slope}|${params.depth}`
     if (key !== this.key) {
       this.key = key
       this.reset(params)
     }
     if (dt > 0) {
-      const terr = x => Math.min(Math.max(params.slope * (x - params.shore), -params.depth), 3)
       for (let j = 0; j < COLS; j++) {
         const z = (j / (COLS - 1) - 0.5) * 2 * region
         const xi = sampleDispX(this.xb, z)
         this.drive[j] = this.xb + xi
         this.ve[j] = Math.max(-MAX_DRIVE_SPEED, Math.min((xi - this.prevXi[j]) / dt, MAX_DRIVE_SPEED))
         this.prevXi[j] = xi
-        // water column at the junction, replicating the shader's attenuation
-        // and soft clamp so the film's seaward edge meets the wave surface
-        const t = terr(this.drive[j])
-        const dy = sampleHeight(this.drive[j], z) * shoreHeightScale(t) - t - 0.01
-        this.hJunc[j] = 0.01 + 0.5 * (dy + Math.sqrt(dy * dy + 0.0225))
       }
       const sub = Math.min(dt, 0.04) / SUBSTEPS
       for (let s = 0; s < SUBSTEPS; s++) {
@@ -100,7 +92,7 @@ export class ChainSim {
         this.texData[o] = this.x[base + i] - (this.xb + i * this.Lr)
         this.texData[o + 1] = this.u[base + i]
         this.texData[o + 2] = tip
-        this.texData[o + 3] = this.hJunc[j]
+        this.texData[o + 3] = 0
       }
     }
     this.device.queue.writeTexture(
@@ -149,12 +141,6 @@ export class ChainSim {
   }
 }
 
-// must match shoreHeightScale in wave_common.wgsl
-function shoreHeightScale(ty) {
-  const s = Math.min(Math.max((ty + 1.2) / 1.05, 0), 1)
-  return 1 - 0.65 * s * s * (3 - 2 * s)
-}
-
 function smoothStrided(a, offset, stride, count, k) {
   for (let j = 1; j < count - 1; j++) {
     const o = offset + j * stride
@@ -184,22 +170,6 @@ export function sampleWaveDispX(x, z, noise, waveField, layers, chop, k0, params
   const t = Math.min(Math.max((ty + 0.6) / 0.7, 0), 1)
   const wSea = 1 - t * t * (3 - 2 * t)
   return dsum * amp * wSea
-}
-
-// CPU replica of the layered wave height (without choppy displacement)
-export function sampleWaveHeight(x, z, noise, waveField, layers) {
-  const tex = noise.channels.height
-  const size = noise.size
-  const copies = waveField.data
-  let h = 0
-  for (const l of layers) {
-    const u0 = (x * l.dx + z * l.dz) * l.invL + l.su
-    const v0 = (-x * l.dz + z * l.dx) * l.invL + l.sv
-    for (let k = 0; k < 3; k++) {
-      h += l.amp * copies[k * 4 + 2] * bilinearWrap(tex, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
-    }
-  }
-  return h
 }
 
 function bilinearWrap(tex, size, u, v) {

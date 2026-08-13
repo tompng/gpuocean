@@ -91,18 +91,22 @@ fn vs(in: VSIn) -> VSOut {
   let disp = w.disp * (1.0 - sb) + vec2f(chainDx, 0.0) * sb;
   let dispXZ = xz + disp;
   let ty = terrainHeight(dispXZ);
-  let yWave = softClamp(w.height, ty);
-  // Film thickness tapers from the junction's actual water column (so the
-  // seaward edge meets the wave surface) to zero at the tip; at rest the
-  // column is REST_DEPTH and terrain + thickness cancels to the flat sea.
-  // Seaward of the junction (the blend ramp) the terrain keeps dropping
-  // while the column stays at the junction value, so clamp the film's
-  // terrain at the junction's — the extrapolation is then flat at the
-  // junction's water level instead of sagging below the sea
+  // The film carries no wave height: the vertical displacement ramps out
+  // across the handover band and is zero from the junction on, so water
+  // never wells up out of the beach — the surge shows through horizontal
+  // motion over the slope instead
+  let yWave = softClamp(w.height * (1.0 - sb), ty);
+  // Film thickness tapers from the junction's still-water column to zero
+  // at the tip, so the junction sits exactly at sea level and at rest
+  // terrain + thickness cancels to the flat sea. Seaward of the junction
+  // (the blend ramp) the terrain keeps dropping while the column stays at
+  // the junction value, so clamp the film's terrain at the junction's —
+  // the extrapolation is then flat at sea level instead of sagging below
   let junc = u.simX0 + simState(vec2f(u.simX0, xz.y)).x;
-  let tyF = max(ty, terrainHeight(vec2f(junc, dispXZ.y)));
+  let tyJ = terrainHeight(vec2f(junc, dispXZ.y));
+  let tyF = max(ty, tyJ);
   let tTip = clamp((xz.x - u.simX0) / SIM_SPAN, 0.0, 1.0);
-  let y = mix(yWave, tyF + chain.w * (1.0 - tTip), sb);
+  let y = mix(yWave, tyF - tyJ * (1.0 - tTip), sb);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
