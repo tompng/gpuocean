@@ -110,7 +110,10 @@ fn vs_grid(in: VSIn) -> VSOut {
   let sOff = max(xz.x - shoreX(xz.y), islandSDF(xz));
   let sJ0 = -REST_DEPTH / u.slope;
   var y = softClamp(w.height * (1.0 - smoothstep(sJ0 - SIM_BAND, sJ0, sOff)), ty);
-  y -= 1.5 * smoothstep(sJ0 - SIM_BAND, sJ0, sOff);
+  // The dive-under ramp is LINEAR: a smoothstep starts flat, leaving the
+  // grid coincident with the ribbon deep into the band, where differing
+  // tessellations let coarse grid cells poke through as shading stripes
+  y -= 1.5 * clamp((sOff - (sJ0 - SIM_BAND)) / SIM_BAND, 0.0, 1.0);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
@@ -126,13 +129,17 @@ fn vs_grid(in: VSIn) -> VSOut {
 // film's world position lies along the column's landward normal at its
 // displaced normal-distance s, so the swash runs shore-perpendicular.
 fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VSOut {
-  let sRest = simRestS(b);
-  let restWorld = coastP + coastN * sRest;
-  let w = sampleWaves(restWorld, cell);
+  // The wave side anchors to the UNCOMPRESSED material position (band
+  // meters along the normal) — the rest-compressed mapping is only for
+  // placing the film. Wherever the wave side still renders (the handover
+  // band, the faded segment ends), compressed anchors would smear the
+  // world foam into streaks and kink the normals.
+  let matWorld = coastP + coastN * (-REST_DEPTH / u.slope + b);
+  let w = sampleWaves(matWorld, cell);
   let sb = simBlend(b, col);
   let chain = simState(b, col);
-  let chainWorld = coastP + coastN * (sRest + chain.x);
-  let dispXZ = mix(restWorld + w.disp, chainWorld, sb);
+  let chainWorld = coastP + coastN * (simRestS(b) + chain.x);
+  let dispXZ = mix(matWorld + w.disp, chainWorld, sb);
   let ty = terrainHeight(dispXZ);
   // The film carries no wave height: the vertical displacement ramps out
   // across the handover band and is zero from the junction on, so water
@@ -152,7 +159,7 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   let y = mix(yWave, tyF - tyJ * (1.0 - tTip), sb);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
-  out.gridXZ = restWorld;
+  out.gridXZ = matWorld;
   out.cut = -1.0;
   out.st = vec2f(b, col);
   out.clip = u.viewProj * vec4f(out.world, 1.0);
@@ -312,8 +319,10 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // foam renders as before
   let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
   let foamLevel = mix(foamAcc.r, filmAcc.b + filmAcc.r * 0.8, sbF);
-  // the film's pattern anchors to its (s, alongshore) material coordinates
-  let patXZ = mix(in.gridXZ, vec2f(simRestS(in.st.x), colT(in.st.y)), sbF);
+  // The film's pattern anchors to its (band, alongshore) material
+  // coordinates — band meters, NOT rest s, which would compress the whole
+  // band onto the thin wedge and smear the pattern into alongshore streaks
+  let patXZ = mix(in.gridXZ, vec2f(in.st.x, colT(in.st.y)), sbF);
   let pat = textureSample(foamPatTex, samp, patXZ / (5.0 * u.foamScale)).r;
   let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamLevel));
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
