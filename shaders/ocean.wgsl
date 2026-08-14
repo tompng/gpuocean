@@ -136,7 +136,7 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   // world foam into streaks and kink the normals.
   let matWorld = coastP + coastN * (-REST_DEPTH / u.slope + b);
   let w = sampleWaves(matWorld, cell);
-  let sb = simBlend(b, col);
+  let sb = simBlend(b);
   let chain = simState(b, col);
   let chainWorld = coastP + coastN * (simRestS(b) + chain.x);
   let dispXZ = mix(matWorld + w.disp, chainWorld, sb);
@@ -239,7 +239,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     discard;
   }
   let dist = distance(u.cameraPos, in.world);
-  let sbF = simBlend(in.st.x, in.st.y);
+  let sbF = simBlend(in.st.x);
   // Gravity-wave normal detail follows the geometry, whose height dies
   // across the handover band; sampled in the film's compressed material it
   // would otherwise keep painting shading bumps onto the flat sheet.
@@ -317,14 +317,19 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // instantaneous compression) drives the front at full strength and the
   // accumulated trail follows at reduced weight; offshore the accumulated
   // foam renders as before
+  // The two foam systems live in different material frames — world for
+  // wave foam, (band, alongshore) for film foam — so each erodes its own
+  // pattern lookup in its own frame and only the resulting MASKS blend.
+  // Eroding a single pattern at blended coordinates smears it into
+  // streaks across the handover where the frames diverge.
   let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
-  let foamLevel = mix(foamAcc.r, filmAcc.b + filmAcc.r * 0.8, sbF);
-  // The film's pattern anchors to its (band, alongshore) material
-  // coordinates — band meters, NOT rest s, which would compress the whole
-  // band onto the thin wedge and smear the pattern into alongshore streaks
-  let patXZ = mix(in.gridXZ, vec2f(in.st.x, colT(in.st.y)), sbF);
-  let pat = textureSample(foamPatTex, samp, patXZ / (5.0 * u.foamScale)).r;
-  let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamLevel));
+  let patWave = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
+  let patFilm = textureSample(foamPatTex, samp, vec2f(in.st.x, colT(in.st.y)) / (5.0 * u.foamScale)).r;
+  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * foamAcc.r));
+  let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * (filmAcc.b + filmAcc.r * 0.8)));
+  // the masks are thresholded 0/1 fields, so foam is present when either
+  // system says so — a blend would half-fade both across the handover
+  let foamMask = min(maskWave + maskFilm, 1.0);
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);

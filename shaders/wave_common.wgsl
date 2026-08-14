@@ -186,12 +186,11 @@ fn simState(b: f32, col: f32) -> vec4f {
 // with the rest-compressed one and fold the mesh over itself. No landward
 // fade: the last node keeps its full displacement so the discarded-region
 // boundary is exactly the tip polyline.
-fn simBlend(b: f32, col: f32) -> f32 {
-  var edge = 1.0;
-  if (col < f32(MAIN_COLS)) {
-    // fade at the open mainland segment's ends; the island loop needs none
-    let jz = abs(col / f32(MAIN_COLS - 1) - 0.5) * 2.0;
-    edge = 1.0 - smoothstep(0.9, 0.9875, jz);
-  }
-  return smoothstep(-SIM_BAND, 0.0, b) * edge;
+// No alongshore fade: rows beyond the simulated columns reuse the clamped
+// edge column's state instead. A fade would create a zone where the film's
+// world position is partially rest-compressed while the wave side still
+// renders — world-anchored foam seen through that mixed mapping smears
+// into streaks, and the normals kink the same way.
+fn simBlend(b: f32) -> f32 {
+  return smoothstep(-SIM_BAND, 0.0, b);
 }
