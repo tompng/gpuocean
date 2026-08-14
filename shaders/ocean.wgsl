@@ -241,7 +241,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
   // so patches fragment into clumps before vanishing
-  let pat = textureSample(foamPatTex, samp, in.gridXZ / 5.0).r;
+  let pat = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
   let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamAcc.r));
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);

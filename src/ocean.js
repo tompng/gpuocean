@@ -214,6 +214,7 @@ export class Ocean {
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
     u[163] = params.shore - REST_DEPTH / params.slope
+    u[164] = params.foamScale
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     const wire = params.wireframe

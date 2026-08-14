@@ -44,7 +44,7 @@ struct Uniforms {
   simDt: f32,
   waveK: f32,
   simX0: f32,
-  cPad0: f32,
+  foamScale: f32,
   cPad1: f32,
   cPad2: f32,
   cPad3: f32,
