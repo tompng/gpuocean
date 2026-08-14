@@ -69,11 +69,12 @@ fn vs_grid(in: VSIn) -> VSOut {
   // agree inside the overlap band — otherwise a tall crest on the grid
   // can outrun the dive-under margin and poke through the ribbon
   var y = softClamp(w.height * (1.0 - simBlend(xz)), ty);
-  y -= 1.5 * smoothstep(u.simX0 - SIM_BAND, u.simX0, xz.x);
+  let x0 = simX0At(xz.y);
+  y -= 1.5 * smoothstep(x0 - SIM_BAND, x0, xz.x);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
-  out.cut = xz.x - u.simX0;
+  out.cut = xz.x - x0;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -83,14 +84,15 @@ fn vs_grid(in: VSIn) -> VSOut {
 // landward of the tip. Vertex x is normalized over the ribbon's band.
 @vertex
 fn vs(in: VSIn) -> VSOut {
-  let xz = vec2f(u.simX0 - SIM_BAND + in.pos.x * (SIM_SPAN + SIM_BAND), in.pos.y);
+  let x0 = simX0At(in.pos.y);
+  let xz = vec2f(x0 - SIM_BAND + in.pos.x * (SIM_SPAN + SIM_BAND), in.pos.y);
   let w = sampleWaves(xz, in.cell);
   let sb = simBlend(xz);
   // In the chain strip the material displacement comes from the simulated
   // nodes (rest-state compression plus the stored deviation), so foam
   // anchored to material coordinates rides the flow
   let chain = simState(xz);
-  let chainDx = simRestX(xz.x) - xz.x + chain.x;
+  let chainDx = simRestX(xz) - xz.x + chain.x;
   let disp = w.disp * (1.0 - sb) + vec2f(chainDx, 0.0) * sb;
   let dispXZ = xz + disp;
   let ty = terrainHeight(dispXZ);
@@ -105,10 +107,10 @@ fn vs(in: VSIn) -> VSOut {
   // (the blend ramp) the terrain keeps dropping while the column stays at
   // the junction value, so clamp the film's terrain at the junction's —
   // the extrapolation is then flat at sea level instead of sagging below
-  let junc = u.simX0 + simState(vec2f(u.simX0, xz.y)).x;
+  let junc = x0 + simState(vec2f(x0, xz.y)).x;
   let tyJ = terrainHeight(vec2f(junc, dispXZ.y));
   let tyF = max(ty, tyJ);
-  let tTip = clamp((xz.x - u.simX0) / SIM_SPAN, 0.0, 1.0);
+  let tTip = clamp((xz.x - x0) / SIM_SPAN, 0.0, 1.0);
   let y = mix(yWave, tyF - tyJ * (1.0 - tTip), sb);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);

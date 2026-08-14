@@ -43,7 +43,7 @@ struct Uniforms {
   foamDecaySwallow: f32,
   simDt: f32,
   waveK: f32,
-  simX0: f32,
+  shoreCurve: f32,
   foamScale: f32,
   cPad1: f32,
   cPad2: f32,
@@ -60,10 +60,24 @@ fn layerUV(xz: vec2f, i: i32) -> vec2f {
   return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * l.dirScaleAmp.z + l.scroll.xy;
 }
 
+// Static shoreline as a function graph x = shoreX(z): gentle multi-scale
+// curves, amplitude driven by the shoreCurve slider. Everything downstream
+// (terrain, the film's material band, the chain columns) shifts with it.
+// chain.js carries a matching replica.
+fn shoreX(z: f32) -> f32 {
+  return u.shoreX + u.shoreCurve * (6.0 * sin(z * 0.041) + 3.5 * sin(z * 0.093 + 1.7));
+}
+
 // Beach rising along +x (the mean wave direction), flat sea floor offshore,
 // capped at a flat berm above the waterline
 fn terrainHeight(xz: vec2f) -> f32 {
-  return min(max(u.slope * (xz.x - u.shoreX), -u.seaDepth), 3.0);
+  return min(max(u.slope * (xz.x - shoreX(xz.y)), -u.seaDepth), 3.0);
+}
+
+// Material x where the film's band starts (the junction isobath) at a given
+// alongshore position
+fn simX0At(z: f32) -> f32 {
+  return shoreX(z) - REST_DEPTH / u.slope;
 }
 
 // Heightless film chain state, indexed by MATERIAL position: x = horizontal
@@ -87,9 +101,9 @@ const REST_DEPTH: f32 = 0.25;
 // Material -> rest world x: the chain's material band compresses onto the
 // still-water wedge between the junction isobath and the static shoreline;
 // identity outside the band
-fn simRestX(mx: f32) -> f32 {
-  let m = clamp(mx - u.simX0, 0.0, SIM_SPAN);
-  return mx + m * (REST_DEPTH / u.slope / SIM_SPAN - 1.0);
+fn simRestX(xz: vec2f) -> f32 {
+  let m = clamp(xz.x - simX0At(xz.y), 0.0, SIM_SPAN);
+  return xz.x + m * (REST_DEPTH / u.slope / SIM_SPAN - 1.0);
 }
 
 // Waves flatten approaching the waterline: horizontal displacement over the
@@ -101,7 +115,7 @@ fn shoreHeightScale(xz: vec2f) -> f32 {
 }
 
 fn simState(xz: vec2f) -> vec4f {
-  let fx = clamp((xz.x - u.simX0) / (SIM_SPAN / f32(SIM_NODES - 1)), 0.0, f32(SIM_NODES - 1));
+  let fx = clamp((xz.x - simX0At(xz.y)) / (SIM_SPAN / f32(SIM_NODES - 1)), 0.0, f32(SIM_NODES - 1));
   let fz = clamp((xz.y / (2.0 * u.foamRegion) + 0.5) * f32(SIM_COLS - 1), 0.0, f32(SIM_COLS - 1));
   let i0 = i32(floor(fx));
   let i1 = min(i0 + 1, SIM_NODES - 1);
@@ -122,6 +136,7 @@ fn simState(xz: vec2f) -> vec4f {
 // fade: the last node keeps its full displacement so the discarded-region
 // boundary is exactly the tip polyline.
 fn simBlend(xz: vec2f) -> f32 {
-  return smoothstep(u.simX0 - SIM_BAND, u.simX0, xz.x)
+  let x0 = simX0At(xz.y);
+  return smoothstep(x0 - SIM_BAND, x0, xz.x)
     * (1.0 - smoothstep(u.foamRegion - 8.0, u.foamRegion - 1.0, abs(xz.y)));
 }

@@ -78,13 +78,14 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let e = 0.8;
   let restScale = REST_DEPTH / u.slope / SIM_SPAN;
   let compress = (simState(xz - vec2f(e, 0.0)).x - simState(xz + vec2f(e, 0.0)).x) / (2.0 * e * restScale);
-  let worldX = simRestX(xz.x) + sim.x;
+  let worldX = simRestX(xz) + sim.x;
   let inFilm = sb * (1.0 - smoothstep(sim.z - 0.3, sim.z + 0.1, worldX));
   let genSim = inFilm * smoothstep(0.25, 0.7, compress);
   let genR = max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac) * waterGate, genSurf), genSim);
   let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac) * waterGate, max(genSurf, genSim));
   // Foam on the beach face is swallowed where the waves flood over it again
-  let junc = u.simX0 + simState(vec2f(u.simX0, xz.y)).x;
+  let x0 = simX0At(xz.y);
+  let junc = x0 + simState(vec2f(x0, xz.y)).x;
   let swallowed = sb * smoothstep(0.3, -0.7, worldX - junc) * smoothstep(-1.2, -0.3, ty);
   let decayR = mix(u.foamDecay, u.foamDecaySwallow, swallowed);
   let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);

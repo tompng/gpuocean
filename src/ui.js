@@ -1,6 +1,6 @@
 export function setupUI() {
   const params = {}
-  for (const id of ['wavelength', 'amplitude', 'choppiness', 'layers', 'spread', 'dispersion', 'ripple', 'rippleScale', 'rippleAniso', 'rippleBias', 'sss', 'depth', 'caustics', 'sun', 'lean', 'foam', 'foamLife', 'foamScale', 'shore', 'slope']) {
+  for (const id of ['wavelength', 'amplitude', 'choppiness', 'layers', 'spread', 'dispersion', 'ripple', 'rippleScale', 'rippleAniso', 'rippleBias', 'sss', 'depth', 'caustics', 'sun', 'lean', 'foam', 'foamLife', 'foamScale', 'shore', 'slope', 'shoreCurve']) {
     const input = document.getElementById(id)
     const value = input.parentElement.querySelector('span')
     const update = () => {

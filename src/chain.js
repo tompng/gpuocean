@@ -45,32 +45,36 @@ export class ChainSim {
     this.view = this.texture.createView()
   }
 
-  reset(params) {
-    this.xb = params.shore - REST_DEPTH / params.slope
+  reset(params, region) {
     this.Lr = REST_DEPTH / params.slope / (NODES - 1)
     for (let k = 0; k < NODES - 1; k++) {
       this.vol[k] = this.Lr * (REST_DEPTH - (k + 0.5) * this.Lr * params.slope)
     }
+    this.shoreCol = new Float32Array(COLS)
+    this.xbCol = new Float32Array(COLS)
     for (let j = 0; j < COLS; j++) {
-      for (let i = 0; i < NODES; i++) this.x[j * NODES + i] = this.xb + i * this.Lr
+      const z = (j / (COLS - 1) - 0.5) * 2 * region
+      this.shoreCol[j] = shoreXAt(z, params)
+      this.xbCol[j] = this.shoreCol[j] - REST_DEPTH / params.slope
+      for (let i = 0; i < NODES; i++) this.x[j * NODES + i] = this.xbCol[j] + i * this.Lr
+      this.drive[j] = this.xbCol[j]
     }
     this.u.fill(0)
-    this.drive.fill(this.xb)
     this.prevXi.fill(0)
     this.ve.fill(0)
   }
 
   update(dt, params, region, sampleDispX) {
-    const key = `${params.shore}|${params.slope}|${params.depth}`
+    const key = `${params.shore}|${params.slope}|${params.depth}|${params.shoreCurve}`
     if (key !== this.key) {
       this.key = key
-      this.reset(params)
+      this.reset(params, region)
     }
     if (dt > 0) {
       for (let j = 0; j < COLS; j++) {
         const z = (j / (COLS - 1) - 0.5) * 2 * region
-        const xi = sampleDispX(this.xb, z)
-        this.drive[j] = this.xb + xi
+        const xi = sampleDispX(this.xbCol[j], z)
+        this.drive[j] = this.xbCol[j] + xi
         this.ve[j] = Math.max(-MAX_DRIVE_SPEED, Math.min((xi - this.prevXi[j]) / dt, MAX_DRIVE_SPEED))
         this.prevXi[j] = xi
       }
@@ -89,7 +93,7 @@ export class ChainSim {
       const tip = this.x[base + NODES - 1]
       for (let i = 0; i < NODES; i++) {
         const o = (base + i) * 4
-        this.texData[o] = this.x[base + i] - (this.xb + i * this.Lr)
+        this.texData[o] = this.x[base + i] - (this.xbCol[j] + i * this.Lr)
         this.texData[o + 1] = this.u[base + i]
         this.texData[o + 2] = tip
         this.texData[o + 3] = 0
@@ -104,7 +108,8 @@ export class ChainSim {
     const x = this.x
     const u = this.u
     const eta = this.eta
-    const terr = xw => Math.min(Math.max(params.slope * (xw - params.shore), -params.depth), 3)
+    const shore = this.shoreCol[j]
+    const terr = xw => Math.min(Math.max(params.slope * (xw - shore), -params.depth), 3)
     const lFloor = 0.4 * this.Lr
     for (let k = 0; k < NODES - 1; k++) {
       const L = Math.max(x[base + k + 1] - x[base + k], lFloor)
@@ -134,12 +139,17 @@ export class ChainSim {
         if (u[base + i] < u[base + i - 1]) u[base + i] = u[base + i - 1]
       }
     }
-    const xMax = params.shore + Math.min(13, 2.8 / params.slope)
+    const xMax = shore + Math.min(13, 2.8 / params.slope)
     if (x[base + NODES - 1] > xMax) {
       x[base + NODES - 1] = xMax
       if (u[base + NODES - 1] > 0) u[base + NODES - 1] = 0
     }
   }
+}
+
+// must match shoreX in wave_common.wgsl
+function shoreXAt(z, params) {
+  return params.shore + params.shoreCurve * (6 * Math.sin(z * 0.041) + 3.5 * Math.sin(z * 0.093 + 1.7))
 }
 
 function smoothStrided(a, offset, stride, count, k) {
@@ -166,7 +176,7 @@ export function sampleWaveDispX(x, z, noise, waveField, layers, chop, k0, params
     }
     dsum += chop * l.amp * l.dx * s
   }
-  const ty = Math.min(Math.max(params.slope * (x - params.shore), -params.depth), 3)
+  const ty = Math.min(Math.max(params.slope * (x - shoreXAt(z, params)), -params.depth), 3)
   const amp = Math.min(Math.max(1 / Math.tanh(k0 * Math.max(-ty, 0.05)), 1), 2.5)
   const t = Math.min(Math.max((ty + 0.6) / 0.7, 0), 1)
   const wSea = 1 - t * t * (3 - 2 * t)
