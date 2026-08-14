@@ -92,6 +92,8 @@ export class Ocean {
     this.wireRibbonPipeline = makePipeline('vs', 'fs_wire', 'line-list')
     this.fillIslandPipeline = makePipeline('vs_island', 'fs', 'triangle-list')
     this.wireIslandPipeline = makePipeline('vs_island', 'fs_wire', 'line-list')
+    this.fillLandPipeline = makePipeline('vs_land', 'fs_land', 'triangle-list')
+    this.wireLandPipeline = makePipeline('vs_land', 'fs_wire', 'line-list')
     this.bindLayout = bindLayout
     this.filmGroups = filmFoamViews.map(view => device.createBindGroup({
       layout: filmLayout,
@@ -259,6 +261,10 @@ export class Ocean {
     pass.setVertexBuffer(0, this.islandVertexBuffer)
     pass.setIndexBuffer(wire ? this.islandLineIndices : this.islandTriIndices, 'uint32')
     pass.drawIndexed(wire ? this.islandLineCount : this.islandTriCount)
+    pass.setPipeline(wire ? this.wireLandPipeline : this.fillLandPipeline)
+    pass.setVertexBuffer(0, this.vertexBuffer)
+    pass.setIndexBuffer(wire ? this.lineIndices : this.triIndices, 'uint32')
+    pass.drawIndexed(wire ? this.lineCount : this.triCount)
   }
 }
 

@@ -316,6 +316,40 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }
 
+// Land: the same warped grid as the ocean, lifted to the terrain. Where
+// the film thins to nothing at the waterline tip the two surfaces meet;
+// the shading below matches the water shader's dry-sand branch exactly,
+// so the coincident fragments are indistinguishable. Underwater parts
+// are simply occluded by the opaque sea surface.
+@vertex
+fn vs_land(in: VSIn) -> VSOut {
+  let xz = in.pos;
+  var out: VSOut;
+  out.world = vec3f(xz.x, terrainHeight(xz), xz.y);
+  out.gridXZ = xz;
+  out.cut = -1.0;
+  out.st = vec2f(-1000.0, 0.0);
+  out.clip = u.viewProj * vec4f(out.world, 1.0);
+  return out;
+}
+
+@fragment
+fn fs_land(in: VSOut) -> @location(0) vec4f {
+  let e = 0.5;
+  let hx = terrainHeight(in.gridXZ + vec2f(e, 0.0)) - terrainHeight(in.gridXZ - vec2f(e, 0.0));
+  let hz = terrainHeight(in.gridXZ + vec2f(0.0, e)) - terrainHeight(in.gridXZ - vec2f(0.0, e));
+  let n = normalize(vec3f(-hx / (2.0 * e), 1.0, -hz / (2.0 * e)));
+  let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
+  let sunLevel = mix(0.18, 1.0, smoothstep(0.0, 0.5, clamp(u.sunDir.y, 0.0, 1.0)));
+  var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0));
+  let dist = distance(u.cameraPos, in.world);
+  let v = normalize(u.cameraPos - in.world);
+  let fog = 1.0 - exp(-dist * 3e-5);
+  color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
+  color = 1.0 - exp(-1.8 * color);
+  return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
+}
+
 @fragment
 fn fs_wire(in: VSOut) -> @location(0) vec4f {
   if (in.cut > 0.0) {
