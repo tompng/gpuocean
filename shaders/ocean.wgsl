@@ -245,7 +245,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // instantaneous compression) drives the front at full strength and the
   // accumulated trail follows at reduced weight; offshore the accumulated
   // foam renders as before
-  let foamLevel = mix(foamAcc.r, max(foamAcc.b, foamAcc.r * 0.8), sbF);
+  let foamLevel = mix(foamAcc.r, foamAcc.b + foamAcc.r * 0.8, sbF);
   let pat = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
   let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamLevel));
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
