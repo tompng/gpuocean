@@ -14,7 +14,7 @@ const COLS = 256
 const NODES = 64
 const SUBSTEPS = 4
 const GRAVITY = 9.81
-const FRICTION = 0.15
+const FRICTION = 0.3
 const VISC_Q = 0.25
 // caps keep shock transients CFL-stable on centimeter-scale segments
 const A_CAP = 25
@@ -120,7 +120,8 @@ export class ChainSim {
       const dx = Math.max((i < NODES - 1 ? x[base + i + 1] - x[base + i - 1] : x[base + i] - x[base + i - 1]) / 2, this.Lr)
       let a = -GRAVITY * (etaR - eta[i - 1]) / dx
       a = Math.max(-A_CAP, Math.min(a, A_CAP))
-      u[base + i] += (a - FRICTION * u[base + i]) * sub
+      const fr = FRICTION * (1 + 3 * i / (NODES - 1))
+      u[base + i] += (a - fr * u[base + i]) * sub
       u[base + i] = Math.max(-U_CAP, Math.min(u[base + i], U_CAP))
     }
     x[base] = this.drive[j]
