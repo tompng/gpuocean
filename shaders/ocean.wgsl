@@ -198,7 +198,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let spec = sunTint(u.sunDir) * (mix(8.0, 4.5, sunWarmth(u.sunDir)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
   let fuv = in.gridXZ / (2.0 * u.foamRegion) + 0.5;
   let edgeFade = 1.0 - smoothstep(0.85, 1.0, max(abs(in.gridXZ.x), abs(in.gridXZ.y)) / u.foamRegion);
-  let foamAcc = textureSample(foamTex, samp, fuv).rg * edgeFade;
+  let foamAcc = textureSample(foamTex, samp, fuv).rgb * edgeFade;
   // Bubble clouds scatter multiply and emerge nearly isotropic (white water);
   // a mild forward lobe remains for thin backlit crests. The film is a sheet
   // too thin to hold a submerged bubble cloud, so the glow fades out there
@@ -241,8 +241,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
   // so patches fragment into clumps before vanishing
+  // In the film the fresh channel (rise-smoothed generation = the film's
+  // instantaneous compression) drives the front at full strength and the
+  // accumulated trail follows at reduced weight; offshore the accumulated
+  // foam renders as before
+  let foamLevel = mix(foamAcc.r, max(foamAcc.b, foamAcc.r * 0.8), sbF);
   let pat = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
-  let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamAcc.r));
+  let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamLevel));
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);

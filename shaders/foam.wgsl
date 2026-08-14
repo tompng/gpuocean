@@ -68,18 +68,19 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let waterGate = smoothstep(0.0, 0.3, s.y - ty);
   let dNow = max(-ty, 0.05);
   let genSurf = smoothstep(0.55, 0.9, s.y / dNow) * smoothstep(0.0, 0.5, dNow) * waterGate;
-  // Film chain: foam where the chain compresses (a bore running through the
-  // film) and under fast sheets, only seaward of the tip. No advection
-  // needed — foam is material-anchored and the mesh moves with the chain
+  // Film chain: the foam source is the film's compression relative to
+  // rest — packed material at a bore front or piled against the incoming
+  // wave. The same quantity the surface shader once computed per fragment
+  // now accumulates here, so the buffer records exactly what the front
+  // generates and the fresh channel doubles as the rendered instant foam.
+  // No advection needed — foam is material-anchored and rides the mesh.
   let sim = simState(xz);
   let e = 0.8;
-  // relative compression strain: the displacement deviation is on the rest
-  // wedge's scale, so normalize the material-space gradient by it
   let restScale = REST_DEPTH / u.slope / SIM_SPAN;
   let compress = (simState(xz - vec2f(e, 0.0)).x - simState(xz + vec2f(e, 0.0)).x) / (2.0 * e * restScale);
   let worldX = simRestX(xz.x) + sim.x;
   let inFilm = sb * (1.0 - smoothstep(sim.z - 0.3, sim.z + 0.1, worldX));
-  let genSim = inFilm * max(smoothstep(0.2, 0.5, compress), 0.7 * smoothstep(1.2, 2.4, abs(sim.y)));
+  let genSim = inFilm * smoothstep(0.25, 0.7, compress);
   let genR = max(max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac) * waterGate, genSurf), genSim);
   let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac) * waterGate, max(genSurf, genSim));
   // Foam on the beach face is swallowed where the waves flood over it again
