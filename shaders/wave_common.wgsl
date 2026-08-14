@@ -68,10 +68,28 @@ fn shoreX(z: f32) -> f32 {
   return u.shoreX + u.shoreCurve * (6.0 * sin(z * 0.041) + 3.5 * sin(z * 0.093 + 1.7));
 }
 
-// Beach rising along +x (the mean wave direction), flat sea floor offshore,
-// capped at a flat berm above the waterline
+fn dShoreX(z: f32) -> f32 {
+  return u.shoreCurve * (6.0 * 0.041 * cos(z * 0.041) + 3.5 * 0.093 * cos(z * 0.093 + 1.7));
+}
+
+// Landward unit normal of the coastline
+fn coastNormal(z: f32) -> vec2f {
+  let d = dShoreX(z);
+  return vec2f(1.0, -d) / sqrt(1.0 + d * d);
+}
+
+// Signed distance to the coastline (negative in the sea): the x-offset
+// foreshortened by the coast's obliquity. Exact for a straight coast, with
+// curvature error ~ d^2/2R; swap for a baked SDF for non-graph coasts.
+fn coastSDF(xz: vec2f) -> f32 {
+  let d = dShoreX(xz.y);
+  return (xz.x - shoreX(xz.y)) / sqrt(1.0 + d * d);
+}
+
+// Beach rising along the landward normal, flat sea floor offshore, capped
+// at a flat berm above the waterline
 fn terrainHeight(xz: vec2f) -> f32 {
-  return min(max(u.slope * (xz.x - shoreX(xz.y)), -u.seaDepth), 3.0);
+  return min(max(u.slope * coastSDF(xz), -u.seaDepth), 3.0);
 }
 
 // Material x where the film's band starts (the junction isobath) at a given
@@ -101,9 +119,12 @@ const REST_DEPTH: f32 = 0.25;
 // Material -> rest world x: the chain's material band compresses onto the
 // still-water wedge between the junction isobath and the static shoreline;
 // identity outside the band
-fn simRestX(xz: vec2f) -> f32 {
+// Material -> rest s (normal distance from the static shoreline): the
+// chain's material band compresses onto the still-water wedge
+// [-REST_DEPTH/slope, 0]; identity (as an x-offset) outside the band
+fn simRestS(xz: vec2f) -> f32 {
   let m = clamp(xz.x - simX0At(xz.y), 0.0, SIM_SPAN);
-  return xz.x + m * (REST_DEPTH / u.slope / SIM_SPAN - 1.0);
+  return (xz.x - shoreX(xz.y)) + m * (REST_DEPTH / u.slope / SIM_SPAN - 1.0);
 }
 
 // Waves flatten approaching the waterline: horizontal displacement over the

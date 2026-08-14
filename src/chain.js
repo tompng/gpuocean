@@ -45,26 +45,35 @@ export class ChainSim {
     this.view = this.texture.createView()
   }
 
+  // The chain works in s = signed normal distance from the static shoreline
+  // (terr = slope * s), identical for every column; only the drive knows the
+  // column's world position and landward normal.
   reset(params, region) {
+    this.sJ = -REST_DEPTH / params.slope
     this.Lr = REST_DEPTH / params.slope / (NODES - 1)
     for (let k = 0; k < NODES - 1; k++) {
       this.vol[k] = this.Lr * (REST_DEPTH - (k + 0.5) * this.Lr * params.slope)
     }
-    this.shoreCol = new Float32Array(COLS)
-    this.xbCol = new Float32Array(COLS)
+    this.juncWorld = new Float32Array(COLS * 2)
+    this.normal = new Float32Array(COLS * 2)
     for (let j = 0; j < COLS; j++) {
       const z = (j / (COLS - 1) - 0.5) * 2 * region
-      this.shoreCol[j] = shoreXAt(z, params)
-      this.xbCol[j] = this.shoreCol[j] - REST_DEPTH / params.slope
-      for (let i = 0; i < NODES; i++) this.x[j * NODES + i] = this.xbCol[j] + i * this.Lr
-      this.drive[j] = this.xbCol[j]
+      const sx = shoreXAt(z, params)
+      const d = dShoreXAt(z, params)
+      const inv = 1 / Math.sqrt(1 + d * d)
+      this.normal[j * 2] = inv
+      this.normal[j * 2 + 1] = -d * inv
+      this.juncWorld[j * 2] = sx + inv * this.sJ
+      this.juncWorld[j * 2 + 1] = z + -d * inv * this.sJ
+      for (let i = 0; i < NODES; i++) this.x[j * NODES + i] = this.sJ + i * this.Lr
+      this.drive[j] = this.sJ
     }
     this.u.fill(0)
     this.prevXi.fill(0)
     this.ve.fill(0)
   }
 
-  update(dt, params, region, sampleDispX) {
+  update(dt, params, region, sampleDispN) {
     const key = `${params.shore}|${params.slope}|${params.depth}|${params.shoreCurve}`
     if (key !== this.key) {
       this.key = key
@@ -72,9 +81,8 @@ export class ChainSim {
     }
     if (dt > 0) {
       for (let j = 0; j < COLS; j++) {
-        const z = (j / (COLS - 1) - 0.5) * 2 * region
-        const xi = sampleDispX(this.xbCol[j], z)
-        this.drive[j] = this.xbCol[j] + xi
+        const xi = sampleDispN(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1], this.normal[j * 2], this.normal[j * 2 + 1])
+        this.drive[j] = this.sJ + xi
         this.ve[j] = Math.max(-MAX_DRIVE_SPEED, Math.min((xi - this.prevXi[j]) / dt, MAX_DRIVE_SPEED))
         this.prevXi[j] = xi
       }
@@ -93,7 +101,7 @@ export class ChainSim {
       const tip = this.x[base + NODES - 1]
       for (let i = 0; i < NODES; i++) {
         const o = (base + i) * 4
-        this.texData[o] = this.x[base + i] - (this.xbCol[j] + i * this.Lr)
+        this.texData[o] = this.x[base + i] - (this.sJ + i * this.Lr)
         this.texData[o + 1] = this.u[base + i]
         this.texData[o + 2] = tip
         this.texData[o + 3] = 0
@@ -108,8 +116,7 @@ export class ChainSim {
     const x = this.x
     const u = this.u
     const eta = this.eta
-    const shore = this.shoreCol[j]
-    const terr = xw => Math.min(Math.max(params.slope * (xw - shore), -params.depth), 3)
+    const terr = s => Math.min(Math.max(params.slope * s, -params.depth), 3)
     const lFloor = 0.4 * this.Lr
     for (let k = 0; k < NODES - 1; k++) {
       const L = Math.max(x[base + k + 1] - x[base + k], lFloor)
@@ -139,7 +146,7 @@ export class ChainSim {
         if (u[base + i] < u[base + i - 1]) u[base + i] = u[base + i - 1]
       }
     }
-    const xMax = shore + Math.min(13, 2.8 / params.slope)
+    const xMax = Math.min(13, 2.8 / params.slope)
     if (x[base + NODES - 1] > xMax) {
       x[base + NODES - 1] = xMax
       if (u[base + NODES - 1] > 0) u[base + NODES - 1] = 0
@@ -147,9 +154,13 @@ export class ChainSim {
   }
 }
 
-// must match shoreX in wave_common.wgsl
+// must match shoreX / dShoreX in wave_common.wgsl
 function shoreXAt(z, params) {
   return params.shore + params.shoreCurve * (6 * Math.sin(z * 0.041) + 3.5 * Math.sin(z * 0.093 + 1.7))
+}
+
+function dShoreXAt(z, params) {
+  return params.shoreCurve * (6 * 0.041 * Math.cos(z * 0.041) + 3.5 * 0.093 * Math.cos(z * 0.093 + 1.7))
 }
 
 function smoothStrided(a, offset, stride, count, k) {
@@ -159,10 +170,12 @@ function smoothStrided(a, offset, stride, count, k) {
   }
 }
 
-// CPU replica of the layered horizontal wave displacement along x, with the
-// same shallow amplification and waterline fade the vertex shader applies,
-// so the driven junction matches the rendered wave-side displacement
-export function sampleWaveDispX(x, z, noise, waveField, layers, chop, k0, params) {
+// CPU replica of the layered horizontal wave displacement, projected onto
+// the column's landward normal, with the same shallow amplification and
+// waterline fade the vertex shader applies. The sample point is always the
+// junction, whose depth is REST_DEPTH by construction, so those factors
+// are constants of the sample depth.
+export function sampleWaveDispN(x, z, nx, nz, noise, waveField, layers, chop, k0) {
   const tex = noise.channels.disp
   const size = noise.size
   const copies = waveField.data
@@ -174,11 +187,10 @@ export function sampleWaveDispX(x, z, noise, waveField, layers, chop, k0, params
     for (let k = 0; k < 3; k++) {
       s += copies[k * 4 + 2] * bilinearWrap(tex, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
     }
-    dsum += chop * l.amp * l.dx * s
+    dsum += chop * l.amp * (l.dx * nx + l.dz * nz) * s
   }
-  const ty = Math.min(Math.max(params.slope * (x - shoreXAt(z, params)), -params.depth), 3)
-  const amp = Math.min(Math.max(1 / Math.tanh(k0 * Math.max(-ty, 0.05)), 1), 2.5)
-  const t = Math.min(Math.max((ty + 0.6) / 0.7, 0), 1)
+  const amp = Math.min(Math.max(1 / Math.tanh(k0 * REST_DEPTH), 1), 2.5)
+  const t = Math.min(Math.max((-REST_DEPTH + 0.6) / 0.7, 0), 1)
   const wSea = 1 - t * t * (3 - 2 * t)
   return dsum * amp * wSea
 }

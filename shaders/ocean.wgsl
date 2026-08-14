@@ -69,12 +69,15 @@ fn vs_grid(in: VSIn) -> VSOut {
   // agree inside the overlap band — otherwise a tall crest on the grid
   // can outrun the dive-under margin and poke through the ribbon
   var y = softClamp(w.height * (1.0 - simBlend(xz)), ty);
-  let x0 = simX0At(xz.y);
-  y -= 1.5 * smoothstep(x0 - SIM_BAND, x0, xz.x);
+  // Keyed by the material x-offset (not true distance) so the ramp start
+  // coincides exactly with the ribbon's seaward edge line
+  let sOff = xz.x - shoreX(xz.y);
+  let sJ0 = -REST_DEPTH / u.slope;
+  y -= 1.5 * smoothstep(sJ0 - SIM_BAND, sJ0, sOff);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
-  out.cut = xz.x - x0;
+  out.cut = sOff - sJ0;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -92,9 +95,12 @@ fn vs(in: VSIn) -> VSOut {
   // nodes (rest-state compression plus the stored deviation), so foam
   // anchored to material coordinates rides the flow
   let chain = simState(xz);
-  let chainDx = simRestX(xz) - xz.x + chain.x;
-  let disp = w.disp * (1.0 - sb) + vec2f(chainDx, 0.0) * sb;
-  let dispXZ = xz + disp;
+  // The film's world position lies along the LOCAL landward normal at its
+  // displaced normal-distance s, so the swash runs shore-perpendicular
+  // even where the coast is oblique to the wave direction
+  let sDisp = simRestS(xz) + chain.x;
+  let chainWorld = vec2f(shoreX(xz.y), xz.y) + coastNormal(xz.y) * sDisp;
+  let dispXZ = mix(xz + w.disp, chainWorld, sb);
   let ty = terrainHeight(dispXZ);
   // The film carries no wave height: the vertical displacement ramps out
   // across the handover band and is zero from the junction on, so water
@@ -107,8 +113,8 @@ fn vs(in: VSIn) -> VSOut {
   // (the blend ramp) the terrain keeps dropping while the column stays at
   // the junction value, so clamp the film's terrain at the junction's —
   // the extrapolation is then flat at sea level instead of sagging below
-  let junc = x0 + simState(vec2f(x0, xz.y)).x;
-  let tyJ = terrainHeight(vec2f(junc, dispXZ.y));
+  let sJ = -REST_DEPTH / u.slope + simState(vec2f(x0, xz.y)).x;
+  let tyJ = u.slope * sJ;
   let tyF = max(ty, tyJ);
   let tTip = clamp((xz.x - x0) / SIM_SPAN, 0.0, 1.0);
   let y = mix(yWave, tyF - tyJ * (1.0 - tTip), sb);
