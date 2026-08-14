@@ -13,6 +13,14 @@
 const COLS = 256
 const NODES = 64
 const SUBSTEPS = 4
+// Columns 0..MAIN_COLS-1 follow the mainland coast (z in ±80); the rest
+// loop around the island. Must match wave_common.wgsl.
+const MAIN_COLS = 160
+const ISLAND_COLS = 96
+const ISLAND_C = [-45, 15]
+const ISLAND_R = 20
+// The scene's fixed beach slope and mainland curve
+export const SLOPE = 0.15
 const GRAVITY = 9.81
 const FRICTION = 0.3
 const VISC_Q = 0.25
@@ -43,41 +51,67 @@ export class ChainSim {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     })
     this.view = this.texture.createView()
+    this.coastTexture = device.createTexture({
+      size: [COLS, 1],
+      format: 'rgba32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    this.coastView = this.coastTexture.createView()
   }
 
   // The chain works in s = signed normal distance from the static shoreline
   // (terr = slope * s), identical for every column; only the drive knows the
   // column's world position and landward normal.
-  reset(params, region) {
-    this.sJ = -REST_DEPTH / params.slope
-    this.Lr = REST_DEPTH / params.slope / (NODES - 1)
+  reset(params) {
+    this.sJ = -REST_DEPTH / SLOPE
+    this.Lr = REST_DEPTH / SLOPE / (NODES - 1)
     for (let k = 0; k < NODES - 1; k++) {
-      this.vol[k] = this.Lr * (REST_DEPTH - (k + 0.5) * this.Lr * params.slope)
+      this.vol[k] = this.Lr * (REST_DEPTH - (k + 0.5) * this.Lr * SLOPE)
     }
     this.juncWorld = new Float32Array(COLS * 2)
     this.normal = new Float32Array(COLS * 2)
+    const coast = new Float32Array(COLS * 4)
     for (let j = 0; j < COLS; j++) {
-      const z = (j / (COLS - 1) - 0.5) * 2 * region
-      const sx = shoreXAt(z, params)
-      const d = dShoreXAt(z, params)
-      const inv = 1 / Math.sqrt(1 + d * d)
-      this.normal[j * 2] = inv
-      this.normal[j * 2 + 1] = -d * inv
-      this.juncWorld[j * 2] = sx + inv * this.sJ
-      this.juncWorld[j * 2 + 1] = z + -d * inv * this.sJ
+      let px, pz, nx, nz
+      if (j < MAIN_COLS) {
+        const z = (j / (MAIN_COLS - 1) - 0.5) * 160
+        const d = dShoreXAt(z)
+        const inv = 1 / Math.sqrt(1 + d * d)
+        px = shoreXAt(z); pz = z
+        nx = inv; nz = -d * inv
+      } else {
+        const th = (j - MAIN_COLS) / ISLAND_COLS * 2 * Math.PI
+        const r = ISLAND_R + 3 * Math.sin(3 * th + 1)
+        const dr = 9 * Math.cos(3 * th + 1)
+        px = ISLAND_C[0] + Math.cos(th) * r
+        pz = ISLAND_C[1] + Math.sin(th) * r
+        // landward = inward normal of the polar curve r = R(theta)
+        const ox = Math.cos(th) * r - -Math.sin(th) * dr
+        const oz = Math.sin(th) * r - Math.cos(th) * dr
+        const oi = 1 / Math.hypot(ox, oz)
+        nx = -ox * oi; nz = -oz * oi
+      }
+      coast[j * 4] = px; coast[j * 4 + 1] = pz
+      coast[j * 4 + 2] = nx; coast[j * 4 + 3] = nz
+      this.juncWorld[j * 2] = px + nx * this.sJ
+      this.juncWorld[j * 2 + 1] = pz + nz * this.sJ
+      this.normal[j * 2] = nx
+      this.normal[j * 2 + 1] = nz
       for (let i = 0; i < NODES; i++) this.x[j * NODES + i] = this.sJ + i * this.Lr
       this.drive[j] = this.sJ
     }
+    this.device.queue.writeTexture(
+      { texture: this.coastTexture }, coast, { bytesPerRow: COLS * 16 }, [COLS, 1])
     this.u.fill(0)
     this.prevXi.fill(0)
     this.ve.fill(0)
   }
 
-  update(dt, params, region, sampleDispN) {
-    const key = `${params.shore}|${params.slope}|${params.depth}|${params.shoreCurve}`
+  update(dt, params, sampleDispN) {
+    const key = `${params.depth}`
     if (key !== this.key) {
       this.key = key
-      this.reset(params, region)
+      this.reset(params)
     }
     if (dt > 0) {
       for (let j = 0; j < COLS; j++) {
@@ -91,8 +125,10 @@ export class ChainSim {
         for (let j = 0; j < COLS; j++) this.stepColumn(j, sub, params)
       }
       for (let i = 0; i < NODES; i++) {
-        smoothStrided(this.x, i, NODES, COLS, 0.04)
-        smoothStrided(this.u, i, NODES, COLS, 0.04)
+        smoothSeg(this.x, i, NODES, 0, MAIN_COLS, false, 0.04)
+        smoothSeg(this.u, i, NODES, 0, MAIN_COLS, false, 0.04)
+        smoothSeg(this.x, i, NODES, MAIN_COLS, COLS, true, 0.04)
+        smoothSeg(this.u, i, NODES, MAIN_COLS, COLS, true, 0.04)
       }
     }
 
@@ -116,7 +152,7 @@ export class ChainSim {
     const x = this.x
     const u = this.u
     const eta = this.eta
-    const terr = s => Math.min(Math.max(params.slope * s, -params.depth), 3)
+    const terr = s => Math.min(Math.max(SLOPE * s, -params.depth), 3)
     const lFloor = 0.4 * this.Lr
     for (let k = 0; k < NODES - 1; k++) {
       const L = Math.max(x[base + k + 1] - x[base + k], lFloor)
@@ -146,7 +182,7 @@ export class ChainSim {
         if (u[base + i] < u[base + i - 1]) u[base + i] = u[base + i - 1]
       }
     }
-    const xMax = Math.min(13, 2.8 / params.slope)
+    const xMax = Math.min(13, 2.8 / SLOPE)
     if (x[base + NODES - 1] > xMax) {
       x[base + NODES - 1] = xMax
       if (u[base + NODES - 1] > 0) u[base + NODES - 1] = 0
@@ -155,18 +191,23 @@ export class ChainSim {
 }
 
 // must match shoreX / dShoreX in wave_common.wgsl
-function shoreXAt(z, params) {
-  return params.shore + params.shoreCurve * (6 * Math.sin(z * 0.041) + 3.5 * Math.sin(z * 0.093 + 1.7))
+function shoreXAt(z) {
+  return 10 + 0.6 * (6 * Math.sin(z * 0.041) + 3.5 * Math.sin(z * 0.093 + 1.7))
 }
 
-function dShoreXAt(z, params) {
-  return params.shoreCurve * (6 * 0.041 * Math.cos(z * 0.041) + 3.5 * 0.093 * Math.cos(z * 0.093 + 1.7))
+function dShoreXAt(z) {
+  return 0.6 * (6 * 0.041 * Math.cos(z * 0.041) + 3.5 * 0.093 * Math.cos(z * 0.093 + 1.7))
 }
 
-function smoothStrided(a, offset, stride, count, k) {
-  for (let j = 1; j < count - 1; j++) {
-    const o = offset + j * stride
-    a[o] += k * (a[o - stride] + a[o + stride] - 2 * a[o])
+// Alongshore smoothing per coast segment: the mainland is open (ends
+// untouched), the island loop wraps
+function smoothSeg(a, offset, stride, j0, j1, wrap, k) {
+  const n = j1 - j0
+  for (let j = wrap ? 0 : 1; j < (wrap ? n : n - 1); j++) {
+    const o = offset + (j0 + j) * stride
+    const prev = offset + (j0 + (j + n - 1) % n) * stride
+    const next = offset + (j0 + (j + 1) % n) * stride
+    a[o] += k * (a[prev] + a[next] - 2 * a[o])
   }
 }
 

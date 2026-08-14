@@ -4,10 +4,10 @@
 const SIZE = 512
 
 export class FoamSim {
-  constructor(device, code) {
+  constructor(device, code, size = [SIZE, SIZE]) {
     this.device = device
     this.textures = [0, 1].map(() => device.createTexture({
-      size: [SIZE, SIZE],
+      size,
       format: 'rgba16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     }))
@@ -34,9 +34,10 @@ export class FoamSim {
       entries: [
         { binding: 0, resource: { buffer: uniformBuffer } },
         { binding: 1, resource: sampler },
-        { binding: 2, resource: waveTexture.createView() },
+        // the film pass needs no wave field; the wave pass needs no sim
+        ...(waveTexture ? [{ binding: 2, resource: waveTexture.createView() }] : []),
         { binding: 3, resource: this.views[src] },
-        { binding: 7, resource: simView },
+        ...(simView ? [{ binding: 7, resource: simView }] : []),
       ],
     }))
   }

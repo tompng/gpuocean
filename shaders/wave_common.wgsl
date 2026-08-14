@@ -60,12 +60,21 @@ fn layerUV(xz: vec2f, i: i32) -> vec2f {
   return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * l.dirScaleAmp.z + l.scroll.xy;
 }
 
-// Static shoreline as a function graph x = shoreX(z): gentle multi-scale
-// curves, amplitude driven by the shoreCurve slider. Everything downstream
-// (terrain, the film's material band, the chain columns) shifts with it.
-// chain.js carries a matching replica.
+// The scene's fixed coastline: a gently curved mainland (function graph
+// x = shoreX(z)) plus a wobbly-circle island offshore. chain.js carries
+// matching replicas of every shape constant.
 fn shoreX(z: f32) -> f32 {
   return u.shoreX + u.shoreCurve * (6.0 * sin(z * 0.041) + 3.5 * sin(z * 0.093 + 1.7));
+}
+
+const ISLAND_C: vec2f = vec2f(-45.0, 15.0);
+const ISLAND_R: f32 = 20.0;
+
+// Land positive inside; near-SDF (the boundary wobble skews it slightly)
+fn islandSDF(xz: vec2f) -> f32 {
+  let d = xz - ISLAND_C;
+  let th = atan2(d.y, d.x);
+  return ISLAND_R + 3.0 * sin(3.0 * th + 1.0) - length(d);
 }
 
 fn dShoreX(z: f32) -> f32 {
@@ -78,12 +87,12 @@ fn coastNormal(z: f32) -> vec2f {
   return vec2f(1.0, -d) / sqrt(1.0 + d * d);
 }
 
-// Signed distance to the coastline (negative in the sea): the x-offset
-// foreshortened by the coast's obliquity. Exact for a straight coast, with
-// curvature error ~ d^2/2R; swap for a baked SDF for non-graph coasts.
+// Signed distance to the nearest coastline (negative in the sea): the
+// mainland graph foreshortened by its obliquity, unioned with the island.
+// Analytic near-SDFs; swap for a baked SDF for freeform coasts.
 fn coastSDF(xz: vec2f) -> f32 {
   let d = dShoreX(xz.y);
-  return (xz.x - shoreX(xz.y)) / sqrt(1.0 + d * d);
+  return max((xz.x - shoreX(xz.y)) / sqrt(1.0 + d * d), islandSDF(xz));
 }
 
 // Beach rising along the landward normal, flat sea floor offshore, capped
@@ -98,15 +107,16 @@ fn simX0At(z: f32) -> f32 {
   return shoreX(z) - REST_DEPTH / u.slope;
 }
 
-// Heightless film chain state, indexed by MATERIAL position: x = horizontal
-// displacement relative to the REST state (not the material grid),
-// y = velocity, z = column tip x (world), w = unused.
-// The junction's world x is recoverable as simX0 + simState(vec2f(simX0, z)).x
-// since the first node is pinned to it.
+// Heightless film chain state, indexed by (band coordinate b, column):
+// x = s-displacement relative to the REST state, y = velocity,
+// z = column tip s, w = unused. Columns 0..MAIN_COLS-1 run along the
+// mainland (z in ±80); the rest loop around the island (wrapping).
 @group(0) @binding(7) var simTex: texture_2d<f32>;
 
 const SIM_NODES: i32 = 64;
 const SIM_COLS: i32 = 256;
+const MAIN_COLS: i32 = 160;
+const ISLAND_COLS: i32 = 96;
 const SIM_SPAN: f32 = 24.0;
 // Seaward width of the wave-to-film handover band (also the shore ribbon's
 // seaward margin and the open-ocean grid's dive-under ramp)
@@ -116,15 +126,30 @@ const SIM_BAND: f32 = 4.0;
 // canceling the terrain rise so the resting film is the flat sea surface
 const REST_DEPTH: f32 = 0.25;
 
-// Material -> rest world x: the chain's material band compresses onto the
-// still-water wedge between the junction isobath and the static shoreline;
-// identity outside the band
-// Material -> rest s (normal distance from the static shoreline): the
-// chain's material band compresses onto the still-water wedge
-// [-REST_DEPTH/slope, 0]; identity (as an x-offset) outside the band
-fn simRestS(xz: vec2f) -> f32 {
-  let m = clamp(xz.x - simX0At(xz.y), 0.0, SIM_SPAN);
-  return (xz.x - shoreX(xz.y)) + m * (REST_DEPTH / u.slope / SIM_SPAN - 1.0);
+// Band coordinate b (0 at the first node, SIM_SPAN at the tip node) ->
+// rest s (normal distance from the static shoreline): the material band
+// compresses onto the still-water wedge [-REST_DEPTH/slope, 0]; identity
+// outside the band
+fn simRestS(b: f32) -> f32 {
+  let m = clamp(b, 0.0, SIM_SPAN);
+  return -REST_DEPTH / u.slope + b + m * (REST_DEPTH / u.slope / SIM_SPAN - 1.0);
+}
+
+// Island columns wrap; mainland columns clamp at their segment
+fn wrapCol(col: f32) -> f32 {
+  if (col >= f32(MAIN_COLS)) {
+    return f32(MAIN_COLS) + fract((col - f32(MAIN_COLS)) / f32(ISLAND_COLS)) * f32(ISLAND_COLS);
+  }
+  return clamp(col, 0.0, f32(MAIN_COLS - 1));
+}
+
+// Approximate alongshore arclength of a column, for material-anchored
+// pattern coordinates
+fn colT(col: f32) -> f32 {
+  if (col < f32(MAIN_COLS)) {
+    return (col / f32(MAIN_COLS - 1) - 0.5) * 160.0;
+  }
+  return (col - f32(MAIN_COLS)) / f32(ISLAND_COLS) * 6.2832 * ISLAND_R;
 }
 
 // Waves flatten approaching the waterline: horizontal displacement over the
@@ -135,18 +160,23 @@ fn shoreHeightScale(xz: vec2f) -> f32 {
   return mix(1.0, 0.35, smoothstep(-1.2, -0.15, terrainHeight(xz)));
 }
 
-fn simState(xz: vec2f) -> vec4f {
-  let fx = clamp((xz.x - simX0At(xz.y)) / (SIM_SPAN / f32(SIM_NODES - 1)), 0.0, f32(SIM_NODES - 1));
-  let fz = clamp((xz.y / (2.0 * u.foamRegion) + 0.5) * f32(SIM_COLS - 1), 0.0, f32(SIM_COLS - 1));
+fn simState(b: f32, col: f32) -> vec4f {
+  let fx = clamp(b / (SIM_SPAN / f32(SIM_NODES - 1)), 0.0, f32(SIM_NODES - 1));
+  let c = wrapCol(col);
   let i0 = i32(floor(fx));
   let i1 = min(i0 + 1, SIM_NODES - 1);
-  let j0 = i32(floor(fz));
-  let j1 = min(j0 + 1, SIM_COLS - 1);
+  var j0 = i32(floor(c));
+  var j1 = j0 + 1;
+  if (j0 >= MAIN_COLS) {
+    if (j1 >= SIM_COLS) { j1 = MAIN_COLS; }
+  } else {
+    j1 = min(j1, MAIN_COLS - 1);
+  }
   let a = fx - floor(fx);
-  let b = fz - floor(fz);
+  let fb = c - floor(c);
   return mix(
     mix(textureLoad(simTex, vec2i(i0, j0), 0), textureLoad(simTex, vec2i(i1, j0), 0), a),
-    mix(textureLoad(simTex, vec2i(i0, j1), 0), textureLoad(simTex, vec2i(i1, j1), 0), a), b);
+    mix(textureLoad(simTex, vec2i(i0, j1), 0), textureLoad(simTex, vec2i(i1, j1), 0), a), fb);
 }
 
 // Where the chain owns the surface, fading at the alongshore edges. The
@@ -156,8 +186,12 @@ fn simState(xz: vec2f) -> vec4f {
 // with the rest-compressed one and fold the mesh over itself. No landward
 // fade: the last node keeps its full displacement so the discarded-region
 // boundary is exactly the tip polyline.
-fn simBlend(xz: vec2f) -> f32 {
-  let x0 = simX0At(xz.y);
-  return smoothstep(x0 - SIM_BAND, x0, xz.x)
-    * (1.0 - smoothstep(u.foamRegion - 8.0, u.foamRegion - 1.0, abs(xz.y)));
+fn simBlend(b: f32, col: f32) -> f32 {
+  var edge = 1.0;
+  if (col < f32(MAIN_COLS)) {
+    // fade at the open mainland segment's ends; the island loop needs none
+    let jz = abs(col / f32(MAIN_COLS - 1) - 0.5) * 2.0;
+    edge = 1.0 - smoothstep(0.9, 0.9875, jz);
+  }
+  return smoothstep(-SIM_BAND, 0.0, b) * edge;
 }

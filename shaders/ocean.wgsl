@@ -1,14 +1,52 @@
 @group(0) @binding(3) var capTex: texture_2d<f32>;
 @group(0) @binding(4) var foamTex: texture_2d<f32>;
 @group(0) @binding(5) var foamPatTex: texture_2d<f32>;
+// Coast table: per column (P.x, P.z, N.x, N.z), written by chain.js
+@group(0) @binding(8) var coastTex: texture_2d<f32>;
+@group(1) @binding(0) var filmFoamTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) clip: vec4f,
+  // undisplaced rest world position: anchors wave sampling and world foam
   @location(0) gridXZ: vec2f,
   @location(1) world: vec3f,
   // fragments with cut > 0 are discarded: the grid mesh ends just past the
   // junction, hidden under the shore ribbon's overlap
   @location(2) cut: f32,
+  // film material coordinate (band b, column); the grid parks it far seaward
+  @location(3) st: vec2f,
+}
+
+fn coastAt(col: f32) -> vec4f {
+  let c = wrapCol(col);
+  var j0 = i32(floor(c));
+  var j1 = j0 + 1;
+  if (j0 >= MAIN_COLS) {
+    if (j1 >= SIM_COLS) { j1 = MAIN_COLS; }
+  } else {
+    j1 = min(j1, MAIN_COLS - 1);
+  }
+  let a = c - floor(c);
+  return mix(textureLoad(coastTex, vec2i(j0, 0), 0), textureLoad(coastTex, vec2i(j1, 0), 0), a);
+}
+
+fn filmFoamAt(b: f32, col: f32) -> vec4f {
+  let fx = clamp((b + SIM_BAND) / (SIM_BAND + SIM_SPAN) * 127.0, 0.0, 127.0);
+  let c = wrapCol(col);
+  var j0 = i32(floor(c));
+  var j1 = j0 + 1;
+  if (j0 >= MAIN_COLS) {
+    if (j1 >= SIM_COLS) { j1 = MAIN_COLS; }
+  } else {
+    j1 = min(j1, MAIN_COLS - 1);
+  }
+  let i0 = i32(floor(fx));
+  let i1 = min(i0 + 1, 127);
+  let a = fx - floor(fx);
+  let fb = c - floor(c);
+  return mix(
+    mix(textureLoad(filmFoamTex, vec2i(i0, j0), 0), textureLoad(filmFoamTex, vec2i(i1, j0), 0), a),
+    mix(textureLoad(filmFoamTex, vec2i(i0, j1), 0), textureLoad(filmFoamTex, vec2i(i1, j1), 0), a), fb);
 }
 
 struct VSIn {
@@ -68,39 +106,33 @@ fn vs_grid(in: VSIn) -> VSOut {
   // The same height ramp as the ribbon's wave side, so the two surfaces
   // agree inside the overlap band — otherwise a tall crest on the grid
   // can outrun the dive-under margin and poke through the ribbon
-  var y = softClamp(w.height * (1.0 - simBlend(xz)), ty);
-  // Keyed by the material x-offset (not true distance) so the ramp start
-  // coincides exactly with the ribbon's seaward edge line
-  let sOff = xz.x - shoreX(xz.y);
+  // Keyed by the same near-SDF that places both ribbons' seaward edges
+  let sOff = max(xz.x - shoreX(xz.y), islandSDF(xz));
   let sJ0 = -REST_DEPTH / u.slope;
+  var y = softClamp(w.height * (1.0 - smoothstep(sJ0 - SIM_BAND, sJ0, sOff)), ty);
   y -= 1.5 * smoothstep(sJ0 - SIM_BAND, sJ0, sOff);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
   out.cut = sOff - sJ0;
+  out.st = vec2f(-1000.0, 0.0);
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
 
-// Shore ribbon: covers the junction band and the film, ending exactly at
+// Shore ribbons cover the junction band and the film, ending exactly at
 // the chain's material domain end (the waterline tip), so nothing renders
-// landward of the tip. Vertex x is normalized over the ribbon's band.
-@vertex
-fn vs(in: VSIn) -> VSOut {
-  let x0 = simX0At(in.pos.y);
-  let xz = vec2f(x0 - SIM_BAND + in.pos.x * (SIM_SPAN + SIM_BAND), in.pos.y);
-  let w = sampleWaves(xz, in.cell);
-  let sb = simBlend(xz);
-  // In the chain strip the material displacement comes from the simulated
-  // nodes (rest-state compression plus the stored deviation), so foam
-  // anchored to material coordinates rides the flow
-  let chain = simState(xz);
-  // The film's world position lies along the LOCAL landward normal at its
-  // displaced normal-distance s, so the swash runs shore-perpendicular
-  // even where the coast is oblique to the wave direction
-  let sDisp = simRestS(xz) + chain.x;
-  let chainWorld = vec2f(shoreX(xz.y), xz.y) + coastNormal(xz.y) * sDisp;
-  let dispXZ = mix(xz + w.disp, chainWorld, sb);
+// landward of the tip. Vertex x is normalized over the ribbon's band; the
+// film's world position lies along the column's landward normal at its
+// displaced normal-distance s, so the swash runs shore-perpendicular.
+fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VSOut {
+  let sRest = simRestS(b);
+  let restWorld = coastP + coastN * sRest;
+  let w = sampleWaves(restWorld, cell);
+  let sb = simBlend(b, col);
+  let chain = simState(b, col);
+  let chainWorld = coastP + coastN * (sRest + chain.x);
+  let dispXZ = mix(restWorld + w.disp, chainWorld, sb);
   let ty = terrainHeight(dispXZ);
   // The film carries no wave height: the vertical displacement ramps out
   // across the handover band and is zero from the junction on, so water
@@ -113,17 +145,34 @@ fn vs(in: VSIn) -> VSOut {
   // (the blend ramp) the terrain keeps dropping while the column stays at
   // the junction value, so clamp the film's terrain at the junction's —
   // the extrapolation is then flat at sea level instead of sagging below
-  let sJ = -REST_DEPTH / u.slope + simState(vec2f(x0, xz.y)).x;
+  let sJ = -REST_DEPTH / u.slope + simState(0.0, col).x;
   let tyJ = u.slope * sJ;
   let tyF = max(ty, tyJ);
-  let tTip = clamp((xz.x - x0) / SIM_SPAN, 0.0, 1.0);
+  let tTip = clamp(b / SIM_SPAN, 0.0, 1.0);
   let y = mix(yWave, tyF - tyJ * (1.0 - tTip), sb);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
-  out.gridXZ = xz;
+  out.gridXZ = restWorld;
   out.cut = -1.0;
+  out.st = vec2f(b, col);
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
+}
+
+@vertex
+fn vs(in: VSIn) -> VSOut {
+  let z = in.pos.y;
+  let b = in.pos.x * (SIM_SPAN + SIM_BAND) - SIM_BAND;
+  let col = clamp((z / 160.0 + 0.5) * f32(MAIN_COLS - 1), 0.0, f32(MAIN_COLS - 1));
+  return ribbonVertex(b, col, vec2f(shoreX(z), z), coastNormal(z), in.cell);
+}
+
+@vertex
+fn vs_island(in: VSIn) -> VSOut {
+  let b = in.pos.x * (SIM_SPAN + SIM_BAND) - SIM_BAND;
+  let col = in.pos.y;
+  let c = coastAt(col);
+  return ribbonVertex(b, col, c.xy, normalize(c.zw), in.cell);
 }
 
 fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
@@ -183,7 +232,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     discard;
   }
   let dist = distance(u.cameraPos, in.world);
-  let sbF = simBlend(in.gridXZ);
+  let sbF = simBlend(in.st.x, in.st.y);
   // Gravity-wave normal detail follows the geometry, whose height dies
   // across the handover band; sampled in the film's compressed material it
   // would otherwise keep painting shading bumps onto the flat sheet.
@@ -253,8 +302,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // instantaneous compression) drives the front at full strength and the
   // accumulated trail follows at reduced weight; offshore the accumulated
   // foam renders as before
-  let foamLevel = mix(foamAcc.r, foamAcc.b + foamAcc.r * 0.8, sbF);
-  let pat = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
+  let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
+  let foamLevel = mix(foamAcc.r, filmAcc.b + filmAcc.r * 0.8, sbF);
+  // the film's pattern anchors to its (s, alongshore) material coordinates
+  let patXZ = mix(in.gridXZ, vec2f(simRestS(in.st.x), colT(in.st.y)), sbF);
+  let pat = textureSample(foamPatTex, samp, patXZ / (5.0 * u.foamScale)).r;
   let foamMask = smoothstep(0.0, 0.15, pat - (1.05 - 1.15 * foamLevel));
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);

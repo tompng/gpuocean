@@ -1,4 +1,11 @@
+import { SLOPE } from './chain.js'
+
 const GRAVITY = 9.81
+// The scene's fixed coastline baseline (must match chain.js / wave_common)
+const SHORE_X = 10
+const SHORE_CURVE = 0.6
+const ISLAND_COLS = 96
+const MAIN_COLS = 160
 // σ/ρ of water [m^3/s^2] for the capillary dispersion c = sqrt(g/k + (σ/ρ)k)
 const CAPILLARY_SIGMA_RHO = 7.4e-5
 // Warped grid: uniform cells near the center, then exponential growth per
@@ -33,7 +40,7 @@ const RIBBON_CELLS = 140
 const FOAM_RISE = 0.08
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, foamPattern, simView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, simView, coastView, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -49,10 +56,16 @@ export class Ocean {
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 7, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 8, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
+      ],
+    })
+    const filmLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       ],
     })
     const base = {
-      layout: device.createPipelineLayout({ bindGroupLayouts: [bindLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [bindLayout, filmLayout] }),
       multisample: { count: sampleCount },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     }
@@ -77,7 +90,13 @@ export class Ocean {
     this.fillRibbonPipeline = makePipeline('vs', 'fs', 'triangle-list')
     this.wireGridPipeline = makePipeline('vs_grid', 'fs_wire', 'line-list')
     this.wireRibbonPipeline = makePipeline('vs', 'fs_wire', 'line-list')
+    this.fillIslandPipeline = makePipeline('vs_island', 'fs', 'triangle-list')
+    this.wireIslandPipeline = makePipeline('vs_island', 'fs_wire', 'line-list')
     this.bindLayout = bindLayout
+    this.filmGroups = filmFoamViews.map(view => device.createBindGroup({
+      layout: filmLayout,
+      entries: [{ binding: 0, resource: view }],
+    }))
 
     this.uniform = device.createBuffer({
       size: 672,
@@ -105,6 +124,7 @@ export class Ocean {
         { binding: 4, resource: view },
         { binding: 5, resource: patternView },
         { binding: 7, resource: simView },
+        { binding: 8, resource: coastView },
       ],
     }))
 
@@ -122,6 +142,13 @@ export class Ocean {
     this.ribbonLineCount = ribLine.length
     this.ribbonVertexBuffer = createVertexBuffer(device, buildRibbonVertices(RIBBON_CELLS, this.gridN))
 
+    const [islTri, islLine] = buildIndices(RIBBON_CELLS, ISLAND_COLS)
+    this.islandTriIndices = createIndexBuffer(device, islTri)
+    this.islandLineIndices = createIndexBuffer(device, islLine)
+    this.islandTriCount = islTri.length
+    this.islandLineCount = islLine.length
+    this.islandVertexBuffer = createVertexBuffer(device, buildIslandVertices(RIBBON_CELLS, ISLAND_COLS))
+
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
@@ -129,7 +156,7 @@ export class Ocean {
     this.layerCache = []
   }
 
-  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex) {
+  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex, filmIndex) {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
@@ -208,17 +235,18 @@ export class Ocean {
     u[155] = Math.exp(-dt / params.foamLife)
     u[156] = Math.exp(-dt / (params.foamLife * 0.25))
     u[157] = Math.exp(-dt / FOAM_RISE)
-    u[158] = params.shore
-    u[159] = params.slope
+    u[158] = SHORE_X
+    u[159] = SLOPE
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
-    u[163] = params.shoreCurve
+    u[163] = SHORE_CURVE
     u[164] = params.foamScale
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     const wire = params.wireframe
     pass.setBindGroup(0, this.bindGroups[foamIndex])
+    pass.setBindGroup(1, this.filmGroups[filmIndex])
     pass.setPipeline(wire ? this.wireGridPipeline : this.fillGridPipeline)
     pass.setVertexBuffer(0, this.vertexBuffer)
     pass.setIndexBuffer(wire ? this.lineIndices : this.triIndices, 'uint32')
@@ -227,6 +255,10 @@ export class Ocean {
     pass.setVertexBuffer(0, this.ribbonVertexBuffer)
     pass.setIndexBuffer(wire ? this.ribbonLineIndices : this.ribbonTriIndices, 'uint32')
     pass.drawIndexed(wire ? this.ribbonLineCount : this.ribbonTriCount)
+    pass.setPipeline(wire ? this.wireIslandPipeline : this.fillIslandPipeline)
+    pass.setVertexBuffer(0, this.islandVertexBuffer)
+    pass.setIndexBuffer(wire ? this.islandLineIndices : this.islandTriIndices, 'uint32')
+    pass.drawIndexed(wire ? this.islandLineCount : this.islandTriCount)
   }
 }
 
@@ -274,6 +306,21 @@ function buildRibbonVertices(nx, nz) {
       data[p++] = ix / nx
       data[p++] = warpAxis(iz - half)
       data[p++] = Math.max(dxMaterial, cellAt(iz))
+    }
+  }
+  return data
+}
+
+// Island ribbon: a closed loop of ISLAND_COLS columns (the last row wraps
+// back to the first); pos.y is the chain column coordinate
+function buildIslandVertices(nx, cols) {
+  const data = new Float32Array((nx + 1) * (cols + 1) * 3)
+  let p = 0
+  for (let r = 0; r <= cols; r++) {
+    for (let ix = 0; ix <= nx; ix++) {
+      data[p++] = ix / nx
+      data[p++] = MAIN_COLS + r
+      data[p++] = 1.4
     }
   }
   return data
