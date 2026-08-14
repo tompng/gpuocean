@@ -247,7 +247,15 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // which otherwise keeps fresnel and ripple glints alive landward of the film
   let column = max(in.world.y - ty, 0.0);
   let waterM = smoothstep(0.025, 0.09, column);
-  n = normalize(mix(normalize(vec3f(-u.slope, 1.0, 0.0)), n, waterM));
+  // thin columns blend toward the actual terrain normal — a fixed proxy
+  // would tilt the wrong way on beaches not facing the mainland's
+  // direction, and fresnel at grazing angles amplifies that into a dark
+  // sky-reflection rim around the waterline
+  let eT = 0.5;
+  let hx = terrainHeight(in.world.xz + vec2f(eT, 0.0)) - terrainHeight(in.world.xz - vec2f(eT, 0.0));
+  let hz = terrainHeight(in.world.xz + vec2f(0.0, eT)) - terrainHeight(in.world.xz - vec2f(0.0, eT));
+  let nTerr = normalize(vec3f(-hx / (2.0 * eT), 1.0, -hz / (2.0 * eT)));
+  n = normalize(mix(nTerr, n, waterM));
   let v = normalize(u.cameraPos - in.world);
   if (dot(n, v) < 0.0) { n = -n; }
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
