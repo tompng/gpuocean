@@ -152,7 +152,7 @@ export class Ocean {
       const lambda = params.wavelength * SCALE_RATIO ** i
       const tile = lambda * noise.wavesPerTile
       this.phases[i] += Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / tile * dt
-      const angle = DIR_FRACS[i] * spread
+      const angle = params.waveDir * Math.PI / 180 + DIR_FRACS[i] * spread
       meanX += SCALE_RATIO ** (2 * i) * Math.cos(angle)
       meanZ += SCALE_RATIO ** (2 * i) * Math.sin(angle)
       const o = 32 + i * 8
@@ -179,7 +179,9 @@ export class Ocean {
       const tile = lambda * (aniso ? noise : capNoise).wavesPerTile
       const k = 2 * Math.PI / lambda
       this.capPhases[i] += Math.sqrt(GRAVITY / k + CAPILLARY_SIGMA_RHO * k) / tile * dt
-      const angle = aniso ? CAP_ANISO_FRACS[j] * spread : CAP_ANGLES[j]
+      // anisotropic parasitic ripples follow the rotated gravity waves; the
+      // isotropic wind ripples keep their own fixed directions
+      const angle = aniso ? params.waveDir * Math.PI / 180 + CAP_ANISO_FRACS[j] * spread : CAP_ANGLES[j]
       const o = 96 + i * 8
       u[o] = Math.cos(angle)
       u[o + 1] = Math.sin(angle)
