@@ -341,8 +341,8 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the film compresses, blend toward a pattern that is coarser in the
   // cross-shore direction only, so the rendered streaks stop shrinking
   let patFilmUV = vec2f(in.st.x, colT(in.st.y)) / (5.0 * u.foamScale);
-  let patFine = textureSample(foamPatTex, samp, patFilmUV).r;
-  let patCoarse = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 8.0, patFilmUV.y)).r;
+  let patFine = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 3.0, patFilmUV.y)).r;
+  let patCoarse = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 9.0, patFilmUV.y)).r;
   let patFilm = mix(patFine, patCoarse, 1.0 - smoothstep(0.07, 0.4, in.stretch));
   let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * foamAcc.r));
   let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * (filmAcc.b + filmAcc.r * 0.8)));
