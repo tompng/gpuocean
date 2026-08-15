@@ -20,6 +20,8 @@ struct VSOut {
   // world position — the scroll waves' normal Jacobians then stay continuous
   // across the junction instead of kinking into ripple-strength stripes
   @location(4) waveXZ: vec2f,
+  // film stretch: rendered world meters per band meter (rest ~0.07)
+  @location(5) stretch: f32,
 }
 
 fn coastAt(col: f32) -> vec4f {
@@ -125,6 +127,7 @@ fn vs_grid(in: VSIn) -> VSOut {
   out.cut = sOff - sJ0;
   out.st = vec2f(-1000.0, 0.0);
   out.waveXZ = xz;
+  out.stretch = 1.0;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -169,6 +172,9 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   out.cut = -1.0;
   out.st = vec2f(b, col);
   out.waveXZ = mix(matWorld, coastP + coastN * simRestS(b), sb);
+  let eS = 1.0;
+  out.stretch = abs(simRestS(b + eS) + simState(b + eS, col).x
+                  - (simRestS(b - eS) + simState(b - eS, col).x)) / (2.0 * eS);
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -331,7 +337,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // streaks across the handover where the frames diverge.
   let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
   let patWave = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
-  let patFilm = textureSample(foamPatTex, samp, vec2f(in.st.x, colT(in.st.y)) / (5.0 * u.foamScale)).r;
+  // Over-compressed foam filaments merge instead of thinning forever: as
+  // the film compresses, blend toward a pattern that is coarser in the
+  // cross-shore direction only, so the rendered streaks stop shrinking
+  let patFilmUV = vec2f(in.st.x, colT(in.st.y)) / (5.0 * u.foamScale);
+  let patFine = textureSample(foamPatTex, samp, patFilmUV).r;
+  let patCoarse = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 8.0, patFilmUV.y)).r;
+  let patFilm = mix(patFine, patCoarse, 1.0 - smoothstep(0.07, 0.4, in.stretch));
   let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * foamAcc.r));
   let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * (filmAcc.b + filmAcc.r * 0.8)));
   // the masks are thresholded 0/1 fields, so foam is present when either
@@ -359,6 +371,7 @@ fn vs_land(in: VSIn) -> VSOut {
   out.cut = -1.0;
   out.st = vec2f(-1000.0, 0.0);
   out.waveXZ = xz;
+  out.stretch = 1.0;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
