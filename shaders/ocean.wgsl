@@ -143,8 +143,11 @@ fn vs_grid(in: VSIn) -> VSOut {
   var y = softClamp(w.height * (1.0 - smoothstep(sJ0 - SIM_BAND, sJ0, sOff)), ty);
   // The dive-under ramp is LINEAR: a smoothstep starts flat, leaving the
   // grid coincident with the ribbon deep into the band, where differing
-  // tessellations let coarse grid cells poke through as shading stripes
-  y -= 1.5 * clamp((sOff - (sJ0 - SIM_BAND)) / SIM_BAND, 0.0, 1.0);
+  // tessellations let coarse grid cells poke through as shading stripes.
+  // It fades out as cells outgrow the band: a coarse cell straddling the
+  // ramp would open a visible pit, and far away the attenuated waves leave
+  // the grid nearly coplanar with the ribbon anyway.
+  y -= 1.5 * clamp((sOff - (sJ0 - SIM_BAND)) / SIM_BAND, 0.0, 1.0) * (1.0 - smoothstep(1.0, 3.0, wv.z));
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
