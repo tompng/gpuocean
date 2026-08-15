@@ -71,12 +71,13 @@ fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
   var disp = vec2f(0.0);
   for (var i = 0; i < i32(u.numLayers); i++) {
     let l = u.layers[i];
-    // Coarse cells sample a mip matching their footprint, so distant waves
-    // average toward zero instead of aliasing vertex heights
-    let lod = clamp(log2(max(cell * l.dirScaleAmp.z * u.hGrad, 1.0)), 0.0, 9.0);
-    let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), lod);
-    height += l.dirScaleAmp.w * s.x;
-    disp += (u.choppiness * l.dirScaleAmp.w * s.y) * l.dirScaleAmp.xy;
+    // The noise is band-limited, so a smooth attenuation on the layer's
+    // texel footprint stands in for mip filtering: coarse cells fade the
+    // layer out instead of aliasing vertex heights, with no level seams
+    let att = 1.0 - smoothstep(5.0, 14.0, cell * l.dirScaleAmp.z * u.hGrad);
+    let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
+    height += l.dirScaleAmp.w * s.x * att;
+    disp += (u.choppiness * l.dirScaleAmp.w * s.y * att) * l.dirScaleAmp.xy;
   }
   height *= shoreHeightScale(xz);
   // Forward displacement through a convex ramp of crest-relative height:
@@ -198,11 +199,15 @@ fn vs_island(in: VSIn) -> VSOut {
 fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
   var dPx = vec3f(1.0, 0.0, 0.0);
   var dPz = vec3f(0.0, 0.0, 1.0);
+  // per-pixel sampling footprint in meters; the same band-limited-noise
+  // argument as the vertex shader replaces mip filtering with a smooth
+  // per-layer attenuation (texels per pixel against the band's wavelength)
+  let mpp = length(fwidth(xz));
   for (var i = 0; i < i32(u.numLayers); i++) {
     let l = u.layers[i];
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
-    let amp = l.dirScaleAmp.w;
+    let amp = l.dirScaleAmp.w * (1.0 - smoothstep(5.0, 14.0, mpp * l.dirScaleAmp.z * u.hGrad));
     let s = textureSample(waveTex, samp, layerUV(xz, i));
     let duvdx = vec2f(dir.x, -dir.y) * invL;
     let duvdz = vec2f(dir.y, dir.x) * invL;
@@ -234,10 +239,10 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
     var amp: f32;
     if (i < 3) {
       s = textureSample(capTex, samp, uvc);
-      amp = isoScale * l.dirScaleAmp.w * u.capHGrad;
+      amp = isoScale * l.dirScaleAmp.w * u.capHGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.capHGrad));
     } else {
       s = textureSample(waveTex, samp, uvc);
-      amp = anisoScale * l.dirScaleAmp.w * u.hGrad;
+      amp = anisoScale * l.dirScaleAmp.w * u.hGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.hGrad));
     }
     let grad = vec2f(s.z, s.w) * amp;
     dPx.y += dot(grad, vec2f(dir.x, -dir.y) * invL);

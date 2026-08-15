@@ -18,13 +18,13 @@ const SUN_AZIMUTH = [0.65, -0.76]
 
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
-  const [waveFieldCode, mipCode, waveCommonCode, oceanCode, atmosphereCode, skyCode, foamCode, filmFoamCode] = await Promise.all(
-    ['wave_field', 'mip', 'wave_common', 'ocean', 'atmosphere', 'sky', 'foam', 'filmfoam'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
+  const [waveFieldCode, waveCommonCode, oceanCode, atmosphereCode, skyCode, foamCode, filmFoamCode] = await Promise.all(
+    ['wave_field', 'wave_common', 'ocean', 'atmosphere', 'sky', 'foam', 'filmfoam'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
   )
   const noise = generateGravityNoiseTexture(device)
   const capNoise = generateCapillaryNoiseTexture(device)
-  const waveField = new WaveField(device, waveFieldCode, mipCode, noise)
-  const capField = new WaveField(device, waveFieldCode, mipCode, capNoise)
+  const waveField = new WaveField(device, waveFieldCode, noise)
+  const capField = new WaveField(device, waveFieldCode, capNoise)
   const foamPattern = generateFoamPatternTexture(device)
   const foam = new FoamSim(device, waveCommonCode + foamCode)
   const chain = new ChainSim(device)

@@ -7,20 +7,17 @@ const COPY_FACTORS_Y = [0.5, -0.65, 0.35]
 const COPY_OFFSETS = [[0.13, 0.71], [0.53, 0.29], [0.87, 0.61]]
 
 export class WaveField {
-  constructor(device, code, mipCode, noise) {
+  // The noise is band-limited, so instead of mipmaps the renderers apply an
+  // analytic per-layer attenuation matched to their sampling footprint.
+  constructor(device, code, noise) {
     this.device = device
     this.size = noise.size
-    this.mipLevelCount = Math.log2(this.size) + 1
     this.texture = device.createTexture({
       size: [this.size, this.size],
       format: 'rgba16float',
-      mipLevelCount: this.mipLevelCount,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     })
-    this.levelViews = []
-    for (let i = 0; i < this.mipLevelCount; i++) {
-      this.levelViews.push(this.texture.createView({ baseMipLevel: i, mipLevelCount: 1 }))
-    }
+    this.view = this.texture.createView()
 
     const module = device.createShaderModule({ code })
     this.pipeline = device.createRenderPipeline({
@@ -47,24 +44,6 @@ export class WaveField {
       ],
     })
 
-    const mipModule = device.createShaderModule({ code: mipCode })
-    this.mipPipeline = device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: mipModule, entryPoint: 'vs' },
-      fragment: { module: mipModule, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
-    })
-    const mipSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' })
-    this.mipBindGroups = []
-    for (let i = 1; i < this.mipLevelCount; i++) {
-      this.mipBindGroups.push(device.createBindGroup({
-        layout: this.mipPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: mipSampler },
-          { binding: 1, resource: this.levelViews[i - 1] },
-        ],
-      }))
-    }
-
     this.phases = [0, 0, 0]
     this.phasesY = [0, 0, 0]
     this.data = new Float32Array(12)
@@ -83,20 +62,11 @@ export class WaveField {
 
   render(encoder) {
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.levelViews[0], loadOp: 'clear', storeOp: 'store' }],
+      colorAttachments: [{ view: this.view, loadOp: 'clear', storeOp: 'store' }],
     })
     pass.setPipeline(this.pipeline)
     pass.setBindGroup(0, this.bindGroup)
     pass.draw(3)
     pass.end()
-    for (let i = 1; i < this.mipLevelCount; i++) {
-      const mipPass = encoder.beginRenderPass({
-        colorAttachments: [{ view: this.levelViews[i], loadOp: 'clear', storeOp: 'store' }],
-      })
-      mipPass.setPipeline(this.mipPipeline)
-      mipPass.setBindGroup(0, this.mipBindGroups[i - 1])
-      mipPass.draw(3)
-      mipPass.end()
-    }
   }
 }
