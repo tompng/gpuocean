@@ -144,7 +144,7 @@ export class Ocean {
     this.ribbonLineCount = ribLine.length
     this.ribbonVertexBuffer = createVertexBuffer(device, buildRibbonVertices(RIBBON_CELLS, this.gridN))
 
-    const [islTri, islLine] = buildIndices(RIBBON_CELLS, ISLAND_COLS)
+    const [islTri, islLine] = buildIndices(RIBBON_CELLS, ISLAND_COLS * 4)
     this.islandTriIndices = createIndexBuffer(device, islTri)
     this.islandLineIndices = createIndexBuffer(device, islLine)
     this.islandTriCount = islTri.length
@@ -319,14 +319,21 @@ function buildRibbonVertices(nx, nz) {
 
 // Island ribbon: a closed loop of ISLAND_COLS columns (the last row wraps
 // back to the first); pos.y is the chain column coordinate
+// The ribbon subdivides alongshore beyond the sim columns (fractional
+// column coordinates): the seam against the grid is an interpolation-error
+// mismatch between tessellations, so the ribbon's cells must match the
+// grid's density — finer than the grid buys nothing, and the sim itself
+// can stay coarse.
 function buildIslandVertices(nx, cols) {
-  const data = new Float32Array((nx + 1) * (cols + 1) * 3)
+  const SUB = 4
+  const rows = cols * SUB
+  const data = new Float32Array((nx + 1) * (rows + 1) * 3)
   let p = 0
-  for (let r = 0; r <= cols; r++) {
+  for (let r = 0; r <= rows; r++) {
     for (let ix = 0; ix <= nx; ix++) {
       data[p++] = ix / nx
-      data[p++] = MAIN_COLS + r
-      data[p++] = 1.4
+      data[p++] = MAIN_COLS + r / SUB
+      data[p++] = 1.4 / SUB
     }
   }
   return data

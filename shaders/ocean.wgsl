@@ -15,6 +15,11 @@ struct VSOut {
   @location(2) cut: f32,
   // film material coordinate (band b, column); the grid parks it far seaward
   @location(3) st: vec2f,
+  // wave-sampling coordinate for fragment normals: on the ribbons it blends
+  // to the REST-compressed position so that at rest it coincides with the
+  // world position — the scroll waves' normal Jacobians then stay continuous
+  // across the junction instead of kinking into ripple-strength stripes
+  @location(4) waveXZ: vec2f,
 }
 
 fn coastAt(col: f32) -> vec4f {
@@ -119,6 +124,7 @@ fn vs_grid(in: VSIn) -> VSOut {
   out.gridXZ = xz;
   out.cut = sOff - sJ0;
   out.st = vec2f(-1000.0, 0.0);
+  out.waveXZ = xz;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -162,6 +168,7 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   out.gridXZ = matWorld;
   out.cut = -1.0;
   out.st = vec2f(b, col);
+  out.waveXZ = mix(matWorld, coastP + coastN * simRestS(b), sb);
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -248,7 +255,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // material sampling would compress them onto the wedge with a step at
   // the junction — so they survive onto the film without artifacts
   let rippleXZ = mix(in.gridXZ, in.world.xz, sbF);
-  var n = surfaceNormal(in.gridXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ) * (1.0 - sbF));
+  var n = surfaceNormal(in.waveXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ) * (1.0 - sbF));
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
   // which otherwise keeps fresnel and ripple glints alive landward of the film
@@ -351,6 +358,7 @@ fn vs_land(in: VSIn) -> VSOut {
   out.gridXZ = xz;
   out.cut = -1.0;
   out.st = vec2f(-1000.0, 0.0);
+  out.waveXZ = xz;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
