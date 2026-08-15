@@ -211,29 +211,44 @@ function smoothSeg(a, offset, stride, j0, j1, wrap, k) {
   }
 }
 
-// CPU replica of the layered horizontal wave displacement, projected onto
-// the column's landward normal, with the same shallow amplification and
-// waterline fade the vertex shader applies. The sample point is always the
-// junction, whose depth is REST_DEPTH by construction, so those factors
-// are constants of the sample depth.
+// The drive has two parts, both sampled at the junction (whose depth is
+// REST_DEPTH by construction, so the depth factors are constants):
+// - the orbital displacement projected onto the column's landward normal,
+//   with the same shallow amplification and waterline fade the vertex
+//   shader applies to the rendered displacement;
+// - the quasi-static shoreline response: the waterline rides the local sea
+//   LEVEL up the slope regardless of wave direction, which is what keeps
+//   the film moving where waves run parallel to the coast. The level gets
+//   the renderer's near-shore height attenuation at the junction depth.
+// The two are ~90 degrees out of phase, so they combine into a stronger,
+// phase-shifted swash rather than cancelling.
+const DRIVE_LEVEL = 1.0
+const tH = Math.min(Math.max((-REST_DEPTH + 1.2) / 1.05, 0), 1)
+const H_ATT = 1 - 0.65 * tH * tH * (3 - 2 * tH)
+
 export function sampleWaveDispN(x, z, nx, nz, noise, waveField, layers, chop, k0) {
   const tex = noise.channels.disp
+  const texH = noise.channels.height
   const size = noise.size
   const copies = waveField.data
   let dsum = 0
+  let hsum = 0
   for (const l of layers) {
     const u0 = (x * l.dx + z * l.dz) * l.invL + l.su
     const v0 = (-x * l.dz + z * l.dx) * l.invL + l.sv
     let s = 0
+    let sh = 0
     for (let k = 0; k < 3; k++) {
       s += copies[k * 4 + 2] * bilinearWrap(tex, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
+      sh += copies[k * 4 + 2] * bilinearWrap(texH, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
     }
     dsum += chop * l.amp * (l.dx * nx + l.dz * nz) * s
+    hsum += l.amp * sh
   }
   const amp = Math.min(Math.max(1 / Math.tanh(k0 * REST_DEPTH), 1), 2.5)
   const t = Math.min(Math.max((-REST_DEPTH + 0.6) / 0.7, 0), 1)
   const wSea = 1 - t * t * (3 - 2 * t)
-  return dsum * amp * wSea
+  return dsum * amp * wSea + hsum * H_ATT * DRIVE_LEVEL / SLOPE
 }
 
 function bilinearWrap(tex, size, u, v) {
