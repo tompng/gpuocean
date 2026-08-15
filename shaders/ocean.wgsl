@@ -101,14 +101,37 @@ fn softClamp(height: f32, ty: f32) -> f32 {
   return ty + 0.1 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
 }
 
+// The grid/land lattice is static and uniform; the vertex shader maps it
+// around the camera with a radial warp — identity out to WARP_LINEAR, then
+// exponentially growing cells. The center snaps to the lattice pitch so
+// near vertices sit on a fixed world lattice (no swimming); far vertices
+// slide with the camera, which is invisible because every field they
+// sample is a function of world position.
+const WARP_CELL: f32 = 0.4;
+const WARP_LINEAR: f32 = 64.0;
+const WARP_GROWTH: f32 = 1.12;
+
+fn warpVertex(p: vec2f) -> vec3f {
+  let snap = floor(u.cameraPos.xz / WARP_CELL + 0.5) * WARP_CELL;
+  let r = length(p);
+  if (r <= WARP_LINEAR) {
+    return vec3f(snap + p, WARP_CELL);
+  }
+  let k = min((r - WARP_LINEAR) / WARP_CELL, 110.0);
+  let g = pow(WARP_GROWTH, k);
+  let rw = WARP_LINEAR + WARP_CELL * (g - 1.0) / (WARP_GROWTH - 1.0);
+  return vec3f(snap + p * (rw / r), WARP_CELL * g);
+}
+
 // Open-ocean grid: pure scroll waves. Across the shore ribbon's seaward
 // band it dives below the sand and is cut just past the junction, so the
 // ribbon always covers it; at the band's seaward edge both meshes evaluate
 // the same surface, so the overlap seam has matching shape and color.
 @vertex
 fn vs_grid(in: VSIn) -> VSOut {
-  let xz = in.pos;
-  let w = sampleWaves(xz, in.cell);
+  let wv = warpVertex(in.pos);
+  let xz = wv.xy;
+  let w = sampleWaves(xz, wv.z);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
   // The same height ramp as the ribbon's wave side, so the two surfaces
@@ -286,8 +309,9 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
   let r = reflect(-v, n);
   let spec = sunTint(u.sunDir) * (mix(8.0, 4.5, sunWarmth(u.sunDir)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
-  let fuv = in.gridXZ / (2.0 * u.foamRegion) + 0.5;
-  let edgeFade = 1.0 - smoothstep(0.85, 1.0, max(abs(in.gridXZ.x), abs(in.gridXZ.y)) / u.foamRegion);
+  let fCenter = vec2f(u.foamCX, u.foamCZ);
+  let fuv = (in.gridXZ - fCenter) / (2.0 * u.foamRegion) + 0.5;
+  let edgeFade = 1.0 - smoothstep(0.85, 1.0, length(in.gridXZ - fCenter) / u.foamRegion);
   let foamAcc = textureSample(foamTex, samp, fuv).rgb * edgeFade;
   // Bubble clouds scatter multiply and emerge nearly isotropic (white water);
   // a mild forward lobe remains for thin backlit crests. The film is a sheet
@@ -369,7 +393,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 // are simply occluded by the opaque sea surface.
 @vertex
 fn vs_land(in: VSIn) -> VSOut {
-  let xz = in.pos;
+  let xz = warpVertex(in.pos).xy;
   var out: VSOut;
   out.world = vec3f(xz.x, terrainHeight(xz), xz.y);
   out.gridXZ = xz;

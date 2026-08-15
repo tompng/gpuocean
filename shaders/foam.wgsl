@@ -58,7 +58,7 @@ fn waveSurface(xz: vec2f) -> vec2f {
 // rises over ~0.1s instead of popping in frame- and texel-sized steps.
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
-  let xz = (in.uv - 0.5) * (2.0 * u.foamRegion);
+  let xz = vec2f(u.foamCX, u.foamCZ) + (in.uv - 0.5) * (2.0 * u.foamRegion);
   let s = waveSurface(xz);
   let jac = s.x;
   let ty = terrainHeight(xz);
@@ -71,7 +71,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let genR = max(smoothstep(u.foamThreshold, u.foamThreshold - 0.25, jac) * waterGate, genSurf);
   let genG = max(smoothstep(u.foamThreshold - 0.15, u.foamThreshold - 0.45, jac) * waterGate, genSurf);
   let decayR = u.foamDecay;
-  let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);
+  // carry the previous accumulation over, shifted by the window's move;
+  // freshly exposed border has no history
+  let prevUV = in.uv + vec2f(u.foamDX, u.foamDZ);
+  var prev = textureSampleLevel(prevFoam, samp, prevUV, 0.0);
+  if (any(prevUV < vec2f(0.0)) || any(prevUV > vec2f(1.0))) { prev = vec4f(0.0); }
   let smoothR = mix(genR, prev.b, u.foamRise);
   let smoothG = mix(genG, prev.a, u.foamRise);
   return vec4f(max(prev.r * decayR, smoothR), max(prev.g * u.foamDecayG, smoothG), smoothR, smoothG);

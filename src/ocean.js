@@ -239,6 +239,24 @@ export class Ocean {
     u[157] = Math.exp(-dt / FOAM_RISE)
     u[158] = SHORE_X
     u[159] = SLOPE
+    // world foam window follows the camera, snapped to buffer texels so the
+    // carried-over content resamples exactly; frozen while paused so the
+    // accumulated shift never outruns the skipped foam passes
+    const texel = 2 * FOAM_REGION / 512
+    if (!this.foamC) this.foamC = [Math.round(eye[0] / texel) * texel, Math.round(eye[2] / texel) * texel]
+    let fdx = 0
+    let fdz = 0
+    if (dt > 0) {
+      const cx = Math.round(eye[0] / texel) * texel
+      const cz = Math.round(eye[2] / texel) * texel
+      fdx = (cx - this.foamC[0]) / (2 * FOAM_REGION)
+      fdz = (cz - this.foamC[1]) / (2 * FOAM_REGION)
+      this.foamC = [cx, cz]
+    }
+    u[28] = this.foamC[0]
+    u[29] = this.foamC[1]
+    u[30] = fdx
+    u[31] = fdz
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
@@ -275,21 +293,17 @@ function warpAxis(i) {
   return sign * (LINEAR_CELLS * CELL + CELL * (CELL_GROWTH ** (a - LINEAR_CELLS) - 1) / (CELL_GROWTH - 1))
 }
 
+// Uniform lattice in pre-warp space; the vertex shader warps it around the
+// camera (see warpVertex in ocean.wgsl), so the buffer never changes
 function buildVertices(n) {
   const half = n / 2
-  const axis = new Float64Array(n + 1)
-  for (let i = 0; i <= n; i++) axis[i] = warpAxis(i - half)
-  const cellAt = i => {
-    const a = Math.min(Math.abs(i - half), half - 1)
-    return warpAxis(a + 1) - warpAxis(a)
-  }
   const data = new Float32Array((n + 1) * (n + 1) * 3)
   let p = 0
   for (let iz = 0; iz <= n; iz++) {
     for (let ix = 0; ix <= n; ix++) {
-      data[p++] = axis[ix]
-      data[p++] = axis[iz]
-      data[p++] = Math.max(cellAt(ix), cellAt(iz))
+      data[p++] = (ix - half) * CELL
+      data[p++] = (iz - half) * CELL
+      data[p++] = 0
     }
   }
   return data

@@ -18,10 +18,12 @@ struct Uniforms {
   choppiness: f32,
   dGrad: f32,
   hGrad: f32,
-  padB: f32,
-  pad0: f32,
-  pad1: f32,
-  pad2: f32,
+  // world foam window: center follows the camera (snapped to texels);
+  // delta is the center's move since last frame in uv units
+  foamCX: f32,
+  foamCZ: f32,
+  foamDX: f32,
+  foamDZ: f32,
   layers: array<Layer, 8>,
   capLayers: array<Layer, 6>,
   capHGrad: f32,

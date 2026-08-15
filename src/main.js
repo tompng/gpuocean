@@ -113,6 +113,7 @@ async function main() {
       Math.sin(elevation),
       SUN_AZIMUTH[1] * Math.cos(elevation),
     ]
+    camera.move(dt)
     const viewProj = camera.viewProj(w / h)
     sky.render(pass, invert(viewProj), camera.eye, sunDir)
     ocean.render(pass, waveDt, params, noise, capNoise, viewProj, camera.eye, sunDir, foam.index, filmFoam.index)
