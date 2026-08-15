@@ -36,7 +36,17 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let tyM = u.slope * simRestS(b);
   let swallowed = sb * smoothstep(0.3, -0.7, sNow - sJ) * smoothstep(-1.2, -0.3, tyM);
   let decayR = mix(u.foamDecay, u.foamDecaySwallow, swallowed);
-  let prev = textureSampleLevel(prevFoam, samp, in.uv, 0.0);
+  // the mainland rows scroll with the film window; rows shifted in from
+  // outside the segment have no history (island rows never move)
+  var prevUV = in.uv;
+  if (col < f32(MAIN_COLS)) {
+    prevUV.y += u.simZShift / f32(SIM_COLS);
+  }
+  var prev = textureSampleLevel(prevFoam, samp, prevUV, 0.0);
+  let pCol = prevUV.y * f32(SIM_COLS) - 0.5;
+  if (col < f32(MAIN_COLS) && (pCol < -0.5 || pCol >= f32(MAIN_COLS) - 0.5)) {
+    prev = vec4f(0.0);
+  }
   let smoothR = mix(gen, prev.b, u.foamRise);
   let smoothG = mix(gen, prev.a, u.foamRise);
   return vec4f(max(prev.r * decayR, smoothR), max(prev.g * u.foamDecayG, smoothG), smoothR, smoothG);

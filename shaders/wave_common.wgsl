@@ -47,8 +47,10 @@ struct Uniforms {
   waveK: f32,
   shoreCurve: f32,
   foamScale: f32,
-  cPad1: f32,
-  cPad2: f32,
+  // mainland film window: center z (follows the camera in whole-column
+  // steps) and this frame's shift in film-foam buffer rows
+  simZBase: f32,
+  simZShift: f32,
   cPad3: f32,
 }
 
@@ -149,7 +151,7 @@ fn wrapCol(col: f32) -> f32 {
 // pattern coordinates
 fn colT(col: f32) -> f32 {
   if (col < f32(MAIN_COLS)) {
-    return (col / f32(MAIN_COLS - 1) - 0.5) * 160.0;
+    return u.simZBase + (col / f32(MAIN_COLS - 1) - 0.5) * 160.0;
   }
   return (col - f32(MAIN_COLS)) / f32(ISLAND_COLS) * 6.2832 * ISLAND_R;
 }

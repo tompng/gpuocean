@@ -62,9 +62,43 @@ export class ChainSim {
   // The chain works in s = signed normal distance from the static shoreline
   // (terr = slope * s), identical for every column; only the drive knows the
   // column's world position and landward normal.
+  // Mainland columns form a window of fixed width whose center zBase
+  // follows the camera alongshore in whole-column steps. The chain state
+  // lives in s (coast-relative), so shifting the window is a plain row
+  // copy — only each column's world geometry needs recomputing.
+  mainlandGeometry(j) {
+    const z = this.zBase + (j / (MAIN_COLS - 1) - 0.5) * 160
+    const d = dShoreXAt(z)
+    const inv = 1 / Math.sqrt(1 + d * d)
+    this.normal[j * 2] = inv
+    this.normal[j * 2 + 1] = -d * inv
+    this.juncWorld[j * 2] = shoreXAt(z) + inv * this.sJ
+    this.juncWorld[j * 2 + 1] = z + -d * inv * this.sJ
+  }
+
+  shiftWindow(steps) {
+    const s = Math.max(-MAIN_COLS, Math.min(steps, MAIN_COLS))
+    this.zBase += s * (160 / (MAIN_COLS - 1))
+    const copyRow = (dst, src) => {
+      this.x.copyWithin(dst * NODES, src * NODES, (src + 1) * NODES)
+      this.u.copyWithin(dst * NODES, src * NODES, (src + 1) * NODES)
+      this.prevXi[dst] = this.prevXi[src]
+    }
+    // rows shifted in from beyond the window clone the edge column: a much
+    // better initial state than rest, settling within a wave period
+    if (s > 0) {
+      for (let j = 0; j < MAIN_COLS; j++) copyRow(j, Math.min(j + s, MAIN_COLS - 1))
+    } else {
+      for (let j = MAIN_COLS - 1; j >= 0; j--) copyRow(j, Math.max(j + s, 0))
+    }
+    for (let j = 0; j < MAIN_COLS; j++) this.mainlandGeometry(j)
+    return s
+  }
+
   reset(params) {
     this.sJ = -REST_DEPTH / SLOPE
     this.Lr = REST_DEPTH / SLOPE / (NODES - 1)
+    this.zBase = this.zBase || 0
     for (let k = 0; k < NODES - 1; k++) {
       this.vol[k] = this.Lr * (REST_DEPTH - (k + 0.5) * this.Lr * SLOPE)
     }
@@ -74,11 +108,8 @@ export class ChainSim {
     for (let j = 0; j < COLS; j++) {
       let px, pz, nx, nz
       if (j < MAIN_COLS) {
-        const z = (j / (MAIN_COLS - 1) - 0.5) * 160
-        const d = dShoreXAt(z)
-        const inv = 1 / Math.sqrt(1 + d * d)
-        px = shoreXAt(z); pz = z
-        nx = inv; nz = -d * inv
+        this.mainlandGeometry(j)
+        px = 0; pz = 0; nx = 0; nz = 0
       } else {
         const th = (j - MAIN_COLS) / ISLAND_COLS * 2 * Math.PI
         const r = ISLAND_R + 3 * Math.sin(3 * th + 1)
@@ -91,12 +122,15 @@ export class ChainSim {
         const oi = 1 / Math.hypot(ox, oz)
         nx = -ox * oi; nz = -oz * oi
       }
+      // the coast table only serves the island ribbon; mainland entries stay 0
       coast[j * 4] = px; coast[j * 4 + 1] = pz
       coast[j * 4 + 2] = nx; coast[j * 4 + 3] = nz
-      this.juncWorld[j * 2] = px + nx * this.sJ
-      this.juncWorld[j * 2 + 1] = pz + nz * this.sJ
-      this.normal[j * 2] = nx
-      this.normal[j * 2 + 1] = nz
+      if (j >= MAIN_COLS) {
+        this.juncWorld[j * 2] = px + nx * this.sJ
+        this.juncWorld[j * 2 + 1] = pz + nz * this.sJ
+        this.normal[j * 2] = nx
+        this.normal[j * 2 + 1] = nz
+      }
       for (let i = 0; i < NODES; i++) this.x[j * NODES + i] = this.sJ + i * this.Lr
       this.drive[j] = this.sJ
     }
@@ -107,13 +141,16 @@ export class ChainSim {
     this.ve.fill(0)
   }
 
-  update(dt, params, sampleDispN) {
+  update(dt, params, sampleDispN, camZ) {
     const key = `${params.depth}`
     if (key !== this.key) {
       this.key = key
       this.reset(params)
     }
+    this.lastShift = 0
     if (dt > 0) {
+      const steps = Math.round((camZ - this.zBase) / (160 / (MAIN_COLS - 1)))
+      if (steps !== 0) this.lastShift = this.shiftWindow(steps)
       for (let j = 0; j < COLS; j++) {
         const xi = sampleDispN(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1], this.normal[j * 2], this.normal[j * 2 + 1])
         this.drive[j] = this.sJ + xi

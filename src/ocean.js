@@ -257,6 +257,8 @@ export class Ocean {
     u[29] = this.foamC[1]
     u[30] = fdx
     u[31] = fdz
+    u[165] = this.chain.zBase
+    u[166] = this.chain.lastShift
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength

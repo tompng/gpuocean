@@ -32,6 +32,7 @@ async function main() {
   const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, format)
   foam.bind(ocean.uniform, waveField.texture, null)
   filmFoam.bind(ocean.uniform, null, chain.view)
+  ocean.chain = chain
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
@@ -81,7 +82,8 @@ async function main() {
     const capSpeed = Math.sqrt(GRAVITY / capK + CAPILLARY_SIGMA_RHO * capK)
     capField.update(waveDt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
     chain.update(waveDt, params, (x, z, nx, nz) =>
-      sampleWaveDispN(x, z, nx, nz, noise, waveField, ocean.layerCache, params.choppiness, 2 * Math.PI / params.wavelength))
+      sampleWaveDispN(x, z, nx, nz, noise, waveField, ocean.layerCache, params.choppiness, 2 * Math.PI / params.wavelength),
+      camera.target[2])
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)

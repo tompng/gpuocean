@@ -212,9 +212,11 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
 
 @vertex
 fn vs(in: VSIn) -> VSOut {
-  let z = in.pos.y;
+  // rows follow the camera alongshore, snapped to the fine row pitch;
+  // columns map through the film window's moving center
+  let z = floor(u.cameraPos.z / 0.4 + 0.5) * 0.4 + in.pos.y;
   let b = in.pos.x * (SIM_SPAN + SIM_BAND) - SIM_BAND;
-  let col = clamp((z / 160.0 + 0.5) * f32(MAIN_COLS - 1), 0.0, f32(MAIN_COLS - 1));
+  let col = clamp(((z - u.simZBase) / 160.0 + 0.5) * f32(MAIN_COLS - 1), 0.0, f32(MAIN_COLS - 1));
   return ribbonVertex(b, col, vec2f(shoreX(z), z), coastNormal(z), in.cell);
 }
 
