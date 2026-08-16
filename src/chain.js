@@ -42,6 +42,7 @@ export class ChainSim {
     this.eta = new Float32Array(NODES - 1)
     this.drive = new Float32Array(COLS)
     this.prevXi = new Float32Array(COLS)
+    this.levelLP = new Float32Array(COLS)
     this.ve = new Float32Array(COLS)
     this.key = ''
     this.texData = new Float32Array(NODES * COLS * 4)
@@ -83,6 +84,7 @@ export class ChainSim {
       this.x.copyWithin(dst * NODES, src * NODES, (src + 1) * NODES)
       this.u.copyWithin(dst * NODES, src * NODES, (src + 1) * NODES)
       this.prevXi[dst] = this.prevXi[src]
+      this.levelLP[dst] = this.levelLP[src]
     }
     // rows shifted in from beyond the window clone the edge column: a much
     // better initial state than rest, settling within a wave period
@@ -131,6 +133,7 @@ export class ChainSim {
       { texture: this.coastTexture }, coast, { bytesPerRow: COLS * 16 }, [COLS, 1])
     this.u.fill(0)
     this.prevXi.fill(0)
+    this.levelLP.fill(0)
     this.ve.fill(0)
   }
 
@@ -146,8 +149,15 @@ export class ChainSim {
     if (dt > 0) {
       const steps = Math.round((tCam - this.zBase) / (160 / (MAIN_COLS - 1)))
       if (steps !== 0) this.lastShift = this.shiftWindow(steps)
+      // The junction is positionally driven, so the chain's own inertia
+      // never filters the drive; the level term's short-period components
+      // get an explicit low-pass instead. The orbital term stays direct —
+      // its motion is the visible surge.
+      const kLP = 1 - Math.exp(-dt / LEVEL_TAU)
       for (let j = 0; j < COLS; j++) {
-        const xi = sampleDispN(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1], this.normal[j * 2], this.normal[j * 2 + 1])
+        const d = sampleDispN(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1], this.normal[j * 2], this.normal[j * 2 + 1])
+        this.levelLP[j] += (d.level - this.levelLP[j]) * kLP
+        const xi = d.orb + this.levelLP[j]
         this.drive[j] = this.sJ + xi
         this.ve[j] = Math.max(-MAX_DRIVE_SPEED, Math.min((xi - this.prevXi[j]) / dt, MAX_DRIVE_SPEED))
         this.prevXi[j] = xi
@@ -246,6 +256,7 @@ function smoothSeg(a, offset, stride, j0, j1, wrap, k) {
 // The two are ~90 degrees out of phase, so they combine into a stronger,
 // phase-shifted swash rather than cancelling.
 const DRIVE_LEVEL = 1.0
+const LEVEL_TAU = 0.5
 const tH = Math.min(Math.max((-REST_DEPTH + 1.2) / 1.05, 0), 1)
 const H_ATT = 1 - 0.65 * tH * tH * (3 - 2 * tH)
 
@@ -271,7 +282,7 @@ export function sampleWaveDispN(x, z, nx, nz, noise, waveField, layers, chop, k0
   const amp = Math.min(Math.max(1 / Math.tanh(k0 * REST_DEPTH), 1), 2.5)
   const t = Math.min(Math.max((-REST_DEPTH + 0.6) / 0.7, 0), 1)
   const wSea = 1 - t * t * (3 - 2 * t)
-  return dsum * amp * wSea + hsum * H_ATT * DRIVE_LEVEL / SLOPE
+  return { orb: dsum * amp * wSea, level: hsum * H_ATT * DRIVE_LEVEL / SLOPE }
 }
 
 function bilinearWrap(tex, size, u, v) {
