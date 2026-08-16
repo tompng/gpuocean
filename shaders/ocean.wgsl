@@ -117,7 +117,7 @@ fn warpVertex(p: vec2f) -> vec3f {
   if (r <= WARP_LINEAR) {
     return vec3f(snap + p, WARP_CELL);
   }
-  let k = min((r - WARP_LINEAR) / WARP_CELL, 110.0);
+  let k = min((r - WARP_LINEAR) / WARP_CELL, 98.0);
   let g = pow(WARP_GROWTH, k);
   let rw = WARP_LINEAR + WARP_CELL * (g - 1.0) / (WARP_GROWTH - 1.0);
   return vec3f(snap + p * (rw / r), WARP_CELL * g);
