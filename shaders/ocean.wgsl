@@ -169,6 +169,10 @@ fn vs_grid(in: VSIn) -> VSOut {
   return out;
 }
 
+// one ribbon row (28m band / 140 cells) folded down below the grid
+const SKIRT_W: f32 = 0.2;
+const SKIRT_DROP: f32 = 0.1;
+
 // Shore ribbons cover the junction band and the film, ending exactly at
 // the chain's material domain end (the waterline tip), so nothing renders
 // landward of the tip. Vertex x is normalized over the ribbon's band; the
@@ -206,7 +210,13 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   // column stays the still-water depth. Measured against z=0 the whole
   // film abruptly dries on run-up and deepens on run-down.
   let tTip = clamp(b / SIM_SPAN, 0.0, 1.0);
-  let y = mix(yWave, tyF + REST_DEPTH * (1.0 - tTip), sb);
+  var y = mix(yWave, tyF + REST_DEPTH * (1.0 - tTip), sb);
+  // Skirt: the row beyond the band's seaward edge sinks below the grid.
+  // At the edge itself the two tessellations disagree by interpolation
+  // error, and a bare ribbon edge shows see-through slivers wherever the
+  // grid interpolates below it; with both meshes sinking into each
+  // other's territory every crack has geometry behind it.
+  y -= SKIRT_DROP * clamp((-SIM_BAND - b) / SKIRT_W, 0.0, 1.0);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = matWorld;
@@ -243,7 +253,7 @@ fn vs(in: VSIn) -> VSOut {
   // rows follow the camera's coast arclength, snapped to the fine row
   // pitch; columns map through the film window's moving center
   let t = u.simTCam + in.pos.y;
-  let b = in.pos.x * (SIM_SPAN + SIM_BAND) - SIM_BAND;
+  let b = in.pos.x * (SIM_SPAN + SIM_BAND + SKIRT_W) - SIM_BAND - SKIRT_W;
   let col = clamp(((t - u.simZBase) / 160.0 + 0.5) * f32(MAIN_COLS - 1), 0.0, f32(MAIN_COLS - 1));
   let c = mainCoastAt(t);
   return ribbonVertex(b, col, c.xy, c.zw, in.cell);
@@ -251,7 +261,7 @@ fn vs(in: VSIn) -> VSOut {
 
 @vertex
 fn vs_island(in: VSIn) -> VSOut {
-  let b = in.pos.x * (SIM_SPAN + SIM_BAND) - SIM_BAND;
+  let b = in.pos.x * (SIM_SPAN + SIM_BAND + SKIRT_W) - SIM_BAND - SKIRT_W;
   let col = in.pos.y;
   let c = coastAt(col);
   return ribbonVertex(b, col, c.xy, normalize(c.zw), in.cell);
