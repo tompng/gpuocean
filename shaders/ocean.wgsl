@@ -136,8 +136,16 @@ fn vs_grid(in: VSIn) -> VSOut {
   let w = sampleWaves(xz, wv.z);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
-  // Keyed by the same near-SDF that places both ribbons' seaward edges
+  // The cut keys on the DISPLACED position: a vertex materially seaward
+  // of the band can displace landward past the film's junction and poke
+  // out of the ribbon's cover, so it is judged by where it lands — the
+  // extra discards open no gap, the ribbon's wave side and film span
+  // everything landward of the junction continuously. The dive-under
+  // stays on the MATERIAL position: the landed field folds along steep
+  // displacement gradients, and a sink keyed on it opens pit walls along
+  // wave fronts outside the ribbon's cover.
   let sOff = coastSDF(xz);
+  let sOffD = coastSDF(dispXZ);
   let sJ0 = -REST_DEPTH / u.slope;
   // Full height like the ribbon's wave side, so the two surfaces agree at
   // the overlap band's seaward edge; inside the band the dive-under ramp
@@ -153,7 +161,7 @@ fn vs_grid(in: VSIn) -> VSOut {
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
-  out.cut = sOff - sJ0;
+  out.cut = sOffD - sJ0;
   out.st = vec2f(-1000.0, 0.0);
   out.waveXZ = xz;
   out.stretch = 1.0;
