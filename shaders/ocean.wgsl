@@ -194,12 +194,12 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   let sJ = -REST_DEPTH / u.slope + simState(0.0, col).x;
   let tyJ = u.slope * sJ;
   let tyF = max(ty, tyJ);
-  // a strong drive can momentarily push the junction past the static
-  // shoreline (tyJ > 0); the junction column must not go negative there
-  // or the whole film drops below the terrain
-  let colJ = max(-tyJ, 0.02);
+  // The junction column is NOT its depth below the static z=0 level: the
+  // junction moves because the local sea level moved with it, so the
+  // column stays the still-water depth. Measured against z=0 the whole
+  // film abruptly dries on run-up and deepens on run-down.
   let tTip = clamp(b / SIM_SPAN, 0.0, 1.0);
-  let y = mix(yWave, tyF + colJ * (1.0 - tTip), sb);
+  let y = mix(yWave, tyF + REST_DEPTH * (1.0 - tTip), sb);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = matWorld;
