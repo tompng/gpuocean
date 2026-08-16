@@ -1,9 +1,6 @@
 import { SLOPE } from './chain.js'
 
 const GRAVITY = 9.81
-// The scene's fixed coastline baseline (must match chain.js / wave_common)
-const SHORE_X = 10
-const SHORE_CURVE = 0.6
 const ISLAND_COLS = 96
 const MAIN_COLS = 160
 // σ/ρ of water [m^3/s^2] for the capillary dispersion c = sqrt(g/k + (σ/ρ)k)
@@ -40,7 +37,7 @@ const RIBBON_CELLS = 140
 const FOAM_RISE = 0.08
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, simView, coastView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, simView, coastView, sdfView, mainTableView, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -57,6 +54,8 @@ export class Ocean {
         { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 7, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 8, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 10, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
       ],
     })
     const filmLayout = device.createBindGroupLayout({
@@ -127,6 +126,8 @@ export class Ocean {
         { binding: 5, resource: patternView },
         { binding: 7, resource: simView },
         { binding: 8, resource: coastView },
+        { binding: 9, resource: sdfView },
+        { binding: 10, resource: mainTableView },
       ],
     }))
 
@@ -237,7 +238,6 @@ export class Ocean {
     u[155] = Math.exp(-dt / params.foamLife)
     u[156] = Math.exp(-dt / (params.foamLife * 0.25))
     u[157] = Math.exp(-dt / FOAM_RISE)
-    u[158] = SHORE_X
     u[159] = SLOPE
     // world foam window follows the camera, snapped to buffer texels so the
     // carried-over content resamples exactly; frozen while paused so the
@@ -257,12 +257,13 @@ export class Ocean {
     u[29] = this.foamC[1]
     u[30] = fdx
     u[31] = fdz
+    u[23] = this.chain.islandArcStep
     u[165] = this.chain.zBase
     u[166] = this.chain.lastShift
+    u[167] = this.chain.tCamSnap
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
-    u[163] = SHORE_CURVE
     u[164] = params.foamScale
     this.device.queue.writeBuffer(this.uniform, 0, u)
 

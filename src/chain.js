@@ -17,8 +17,6 @@ const SUBSTEPS = 4
 // loop around the island. Must match wave_common.wgsl.
 const MAIN_COLS = 160
 const ISLAND_COLS = 96
-const ISLAND_C = [-45, 15]
-const ISLAND_R = 20
 // The scene's fixed beach slope and mainland curve
 export const SLOPE = 0.15
 const GRAVITY = 9.81
@@ -34,8 +32,10 @@ const MAX_DRIVE_SPEED = 5
 export const REST_DEPTH = 0.25
 
 export class ChainSim {
-  constructor(device) {
+  constructor(device, coast) {
     this.device = device
+    this.coast = coast
+    this.sample4 = new Float32Array(4)
     this.x = new Float32Array(COLS * NODES)
     this.u = new Float32Array(COLS * NODES)
     this.vol = new Float32Array(NODES - 1)
@@ -67,13 +67,13 @@ export class ChainSim {
   // lives in s (coast-relative), so shifting the window is a plain row
   // copy — only each column's world geometry needs recomputing.
   mainlandGeometry(j) {
-    const z = this.zBase + (j / (MAIN_COLS - 1) - 0.5) * 160
-    const d = dShoreXAt(z)
-    const inv = 1 / Math.sqrt(1 + d * d)
-    this.normal[j * 2] = inv
-    this.normal[j * 2 + 1] = -d * inv
-    this.juncWorld[j * 2] = shoreXAt(z) + inv * this.sJ
-    this.juncWorld[j * 2 + 1] = z + -d * inv * this.sJ
+    const t = this.zBase + (j / (MAIN_COLS - 1) - 0.5) * 160
+    const c = this.sample4
+    this.coast.sampleMain(t, c)
+    this.normal[j * 2] = c[2]
+    this.normal[j * 2 + 1] = c[3]
+    this.juncWorld[j * 2] = c[0] + c[2] * this.sJ
+    this.juncWorld[j * 2 + 1] = c[1] + c[3] * this.sJ
   }
 
   shiftWindow(steps) {
@@ -104,28 +104,21 @@ export class ChainSim {
     }
     this.juncWorld = new Float32Array(COLS * 2)
     this.normal = new Float32Array(COLS * 2)
+    const island = this.coast.island
+    this.islandArcStep = island.step
     const coast = new Float32Array(COLS * 4)
     for (let j = 0; j < COLS; j++) {
-      let px, pz, nx, nz
       if (j < MAIN_COLS) {
         this.mainlandGeometry(j)
-        px = 0; pz = 0; nx = 0; nz = 0
       } else {
-        const th = (j - MAIN_COLS) / ISLAND_COLS * 2 * Math.PI
-        const r = ISLAND_R + 3 * Math.sin(3 * th + 1)
-        const dr = 9 * Math.cos(3 * th + 1)
-        px = ISLAND_C[0] + Math.cos(th) * r
-        pz = ISLAND_C[1] + Math.sin(th) * r
-        // landward = inward normal of the polar curve r = R(theta)
-        const ox = Math.cos(th) * r - -Math.sin(th) * dr
-        const oz = Math.sin(th) * r - Math.cos(th) * dr
-        const oi = 1 / Math.hypot(ox, oz)
-        nx = -ox * oi; nz = -oz * oi
-      }
-      // the coast table only serves the island ribbon; mainland entries stay 0
-      coast[j * 4] = px; coast[j * 4 + 1] = pz
-      coast[j * 4 + 2] = nx; coast[j * 4 + 3] = nz
-      if (j >= MAIN_COLS) {
+        const k = j - MAIN_COLS
+        const px = island.P[k * 2]
+        const pz = island.P[k * 2 + 1]
+        const nx = island.N[k * 2]
+        const nz = island.N[k * 2 + 1]
+        // the coast table only serves the island ribbon; mainland entries stay 0
+        coast[j * 4] = px; coast[j * 4 + 1] = pz
+        coast[j * 4 + 2] = nx; coast[j * 4 + 3] = nz
         this.juncWorld[j * 2] = px + nx * this.sJ
         this.juncWorld[j * 2 + 1] = pz + nz * this.sJ
         this.normal[j * 2] = nx
@@ -141,15 +134,17 @@ export class ChainSim {
     this.ve.fill(0)
   }
 
-  update(dt, params, sampleDispN, camZ) {
+  update(dt, params, sampleDispN, camX, camZ) {
     const key = `${params.depth}`
     if (key !== this.key) {
       this.key = key
       this.reset(params)
     }
+    const tCam = this.coast.nearestMainArc(camX, camZ)
+    this.tCamSnap = Math.floor(tCam / 0.4 + 0.5) * 0.4
     this.lastShift = 0
     if (dt > 0) {
-      const steps = Math.round((camZ - this.zBase) / (160 / (MAIN_COLS - 1)))
+      const steps = Math.round((tCam - this.zBase) / (160 / (MAIN_COLS - 1)))
       if (steps !== 0) this.lastShift = this.shiftWindow(steps)
       for (let j = 0; j < COLS; j++) {
         const xi = sampleDispN(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1], this.normal[j * 2], this.normal[j * 2 + 1])
@@ -225,15 +220,6 @@ export class ChainSim {
       if (u[base + NODES - 1] > 0) u[base + NODES - 1] = 0
     }
   }
-}
-
-// must match shoreX / dShoreX in wave_common.wgsl
-function shoreXAt(z) {
-  return 10 + 0.6 * (6 * Math.sin(z * 0.041) + 3.5 * Math.sin(z * 0.093 + 1.7))
-}
-
-function dShoreXAt(z) {
-  return 0.6 * (6 * 0.041 * Math.cos(z * 0.041) + 3.5 * 0.093 * Math.cos(z * 0.093 + 1.7))
 }
 
 // Alongshore smoothing per coast segment: the mainland is open (ends

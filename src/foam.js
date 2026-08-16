@@ -21,7 +21,7 @@ export class FoamSim {
     this.index = 0
   }
 
-  bind(uniformBuffer, waveTexture, simView) {
+  bind(uniformBuffer, waveTexture, simView, sdfView) {
     const sampler = this.device.createSampler({
       addressModeU: 'repeat',
       addressModeV: 'repeat',
@@ -38,6 +38,7 @@ export class FoamSim {
         ...(waveTexture ? [{ binding: 2, resource: waveTexture.createView() }] : []),
         { binding: 3, resource: this.views[src] },
         ...(simView ? [{ binding: 7, resource: simView }] : []),
+        ...(sdfView ? [{ binding: 9, resource: sdfView }] : []),
       ],
     }))
   }

@@ -13,7 +13,7 @@ struct Uniforms {
   cameraPos: vec3f,
   time: f32,
   sunDir: vec3f,
-  padA: f32,
+  islandArcStep: f32,
   numLayers: f32,
   choppiness: f32,
   dGrad: f32,
@@ -40,18 +40,19 @@ struct Uniforms {
   foamDecay: f32,
   foamDecayG: f32,
   foamRise: f32,
-  shoreX: f32,
+  padB: f32,
   slope: f32,
   foamDecaySwallow: f32,
   simDt: f32,
   waveK: f32,
-  shoreCurve: f32,
+  padC: f32,
   foamScale: f32,
   // mainland film window: center z (follows the camera in whole-column
   // steps) and this frame's shift in film-foam buffer rows
   simZBase: f32,
   simZShift: f32,
-  cPad3: f32,
+  // camera's coast arclength, snapped to the ribbon row pitch
+  simTCam: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -64,51 +65,24 @@ fn layerUV(xz: vec2f, i: i32) -> vec2f {
   return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * l.dirScaleAmp.z + l.scroll.xy;
 }
 
-// The scene's fixed coastline: a gently curved mainland (function graph
-// x = shoreX(z)) plus a wobbly-circle island offshore. chain.js carries
-// matching replicas of every shape constant.
-fn shoreX(z: f32) -> f32 {
-  return u.shoreX + u.shoreCurve * (6.0 * sin(z * 0.041) + 3.5 * sin(z * 0.093 + 1.7));
-}
+// The coastline is authored data (src/coast.js) baked at load into a
+// signed-distance texture (negative in the sea) and arclength tables.
+// Beyond the baked region the coast is a straight line at BASE_SHORE_X.
+@group(0) @binding(9) var sdfTex: texture_2d<f32>;
 
-const ISLAND_C: vec2f = vec2f(-45.0, 15.0);
-const ISLAND_R: f32 = 20.0;
+const SDF_EXTENT: f32 = 384.0;
+const BASE_SHORE_X: f32 = 10.0;
 
-// Land positive inside; near-SDF (the boundary wobble skews it slightly)
-fn islandSDF(xz: vec2f) -> f32 {
-  let d = xz - ISLAND_C;
-  let th = atan2(d.y, d.x);
-  return ISLAND_R + 3.0 * sin(3.0 * th + 1.0) - length(d);
-}
-
-fn dShoreX(z: f32) -> f32 {
-  return u.shoreCurve * (6.0 * 0.041 * cos(z * 0.041) + 3.5 * 0.093 * cos(z * 0.093 + 1.7));
-}
-
-// Landward unit normal of the coastline
-fn coastNormal(z: f32) -> vec2f {
-  let d = dShoreX(z);
-  return vec2f(1.0, -d) / sqrt(1.0 + d * d);
-}
-
-// Signed distance to the nearest coastline (negative in the sea): the
-// mainland graph foreshortened by its obliquity, unioned with the island.
-// Analytic near-SDFs; swap for a baked SDF for freeform coasts.
 fn coastSDF(xz: vec2f) -> f32 {
-  let d = dShoreX(xz.y);
-  return max((xz.x - shoreX(xz.y)) / sqrt(1.0 + d * d), islandSDF(xz));
+  let baked = textureSampleLevel(sdfTex, samp, xz / (2.0 * SDF_EXTENT) + 0.5, 0.0).r;
+  let far = smoothstep(SDF_EXTENT - 48.0, SDF_EXTENT - 8.0, max(abs(xz.x), abs(xz.y)));
+  return mix(baked, xz.x - BASE_SHORE_X, far);
 }
 
 // Beach rising along the landward normal, flat sea floor offshore, capped
 // at a flat berm above the waterline
 fn terrainHeight(xz: vec2f) -> f32 {
   return min(max(u.slope * coastSDF(xz), -u.seaDepth), 3.0);
-}
-
-// Material x where the film's band starts (the junction isobath) at a given
-// alongshore position
-fn simX0At(z: f32) -> f32 {
-  return shoreX(z) - REST_DEPTH / u.slope;
 }
 
 // Heightless film chain state, indexed by (band coordinate b, column):
@@ -153,7 +127,7 @@ fn colT(col: f32) -> f32 {
   if (col < f32(MAIN_COLS)) {
     return u.simZBase + (col / f32(MAIN_COLS - 1) - 0.5) * 160.0;
   }
-  return (col - f32(MAIN_COLS)) / f32(ISLAND_COLS) * 6.2832 * ISLAND_R;
+  return (col - f32(MAIN_COLS)) * u.islandArcStep;
 }
 
 // Waves flatten approaching the waterline: horizontal displacement over the

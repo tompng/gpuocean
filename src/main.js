@@ -4,6 +4,7 @@ import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { FoamSim } from './foam.js'
 import { ChainSim, sampleWaveDispN } from './chain.js'
+import { buildCoast } from './coast.js'
 import { Sky } from './sky.js'
 import { OrbitCamera } from './camera.js'
 import { invert } from './mat4.js'
@@ -27,11 +28,12 @@ async function main() {
   const capField = new WaveField(device, waveFieldCode, capNoise)
   const foamPattern = generateFoamPatternTexture(device)
   const foam = new FoamSim(device, waveCommonCode + foamCode)
-  const chain = new ChainSim(device)
+  const coast = buildCoast(device)
+  const chain = new ChainSim(device, coast)
   const filmFoam = new FoamSim(device, waveCommonCode + filmFoamCode, [128, 256])
-  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, format)
-  foam.bind(ocean.uniform, waveField.texture, null)
-  filmFoam.bind(ocean.uniform, null, chain.view)
+  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, format)
+  foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
+  filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
@@ -83,7 +85,7 @@ async function main() {
     capField.update(waveDt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
     chain.update(waveDt, params, (x, z, nx, nz) =>
       sampleWaveDispN(x, z, nx, nz, noise, waveField, ocean.layerCache, params.choppiness, 2 * Math.PI / params.wavelength),
-      camera.target[2])
+      camera.target[0], camera.target[2])
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)

@@ -141,7 +141,7 @@ fn vs_grid(in: VSIn) -> VSOut {
   // agree inside the overlap band — otherwise a tall crest on the grid
   // can outrun the dive-under margin and poke through the ribbon
   // Keyed by the same near-SDF that places both ribbons' seaward edges
-  let sOff = max(xz.x - shoreX(xz.y), islandSDF(xz));
+  let sOff = coastSDF(xz);
   let sJ0 = -REST_DEPTH / u.slope;
   var y = softClamp(w.height * (1.0 - smoothstep(sJ0 - SIM_BAND, sJ0, sOff)), ty);
   // The dive-under ramp is LINEAR: a smoothstep starts flat, leaving the
@@ -213,14 +213,33 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   return out;
 }
 
+// Mainland coast table: per arclength entry (P.x, P.z, N.x, N.z), with
+// straight extrapolation along the end tangents beyond the table
+@group(0) @binding(10) var mainTable: texture_2d<f32>;
+const MAIN_TABLE_N: i32 = 2048;
+const MAIN_TABLE_STEP: f32 = 0.8;
+
+fn mainCoastAt(t: f32) -> vec4f {
+  let f = t / MAIN_TABLE_STEP + f32(MAIN_TABLE_N - 1) * 0.5;
+  let fc = clamp(f, 0.0, f32(MAIN_TABLE_N - 1));
+  let j0 = min(i32(floor(fc)), MAIN_TABLE_N - 2);
+  let a = fc - f32(j0);
+  var c = mix(textureLoad(mainTable, vec2i(j0, 0), 0), textureLoad(mainTable, vec2i(j0 + 1, 0), 0), a);
+  let n = normalize(c.zw);
+  let over = (f - fc) * MAIN_TABLE_STEP;
+  // tangent = landward normal rotated -90 degrees
+  return vec4f(c.xy + vec2f(-n.y, n.x) * over, n);
+}
+
 @vertex
 fn vs(in: VSIn) -> VSOut {
-  // rows follow the camera alongshore, snapped to the fine row pitch;
-  // columns map through the film window's moving center
-  let z = floor(u.cameraPos.z / 0.4 + 0.5) * 0.4 + in.pos.y;
+  // rows follow the camera's coast arclength, snapped to the fine row
+  // pitch; columns map through the film window's moving center
+  let t = u.simTCam + in.pos.y;
   let b = in.pos.x * (SIM_SPAN + SIM_BAND) - SIM_BAND;
-  let col = clamp(((z - u.simZBase) / 160.0 + 0.5) * f32(MAIN_COLS - 1), 0.0, f32(MAIN_COLS - 1));
-  return ribbonVertex(b, col, vec2f(shoreX(z), z), coastNormal(z), in.cell);
+  let col = clamp(((t - u.simZBase) / 160.0 + 0.5) * f32(MAIN_COLS - 1), 0.0, f32(MAIN_COLS - 1));
+  let c = mainCoastAt(t);
+  return ribbonVertex(b, col, c.xy, c.zw, in.cell);
 }
 
 @vertex
