@@ -73,8 +73,11 @@ fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
     let l = u.layers[i];
     // The noise is band-limited, so a smooth attenuation on the layer's
     // texel footprint stands in for mip filtering: coarse cells fade the
-    // layer out instead of aliasing vertex heights, with no level seams
-    let att = 1.0 - smoothstep(5.0, 14.0, cell * l.dirScaleAmp.z * u.hGrad);
+    // layer out instead of aliasing vertex heights, with no level seams.
+    // The cutoff sits well below the band's Nyquist (~14 texels): with
+    // fewer than ~5 vertices per wave the geometry reads as polygons, so
+    // the height dies early and the fragment normals carry the detail.
+    let att = 1.0 - smoothstep(2.0, 6.0, cell * l.dirScaleAmp.z * u.hGrad);
     let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
     height += l.dirScaleAmp.w * s.x * att;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y * att) * l.dirScaleAmp.xy;
