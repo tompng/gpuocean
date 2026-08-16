@@ -82,7 +82,6 @@ fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
     height += l.dirScaleAmp.w * s.x * att;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y * att) * l.dirScaleAmp.xy;
   }
-  height *= shoreHeightScale(xz);
   // Forward displacement through a convex ramp of crest-relative height:
   // only tall crests lean (a linear ramp would shear every scale by the same
   // angle, reading as wind-carved dunes), and f' saturates to bound the
@@ -137,13 +136,13 @@ fn vs_grid(in: VSIn) -> VSOut {
   let w = sampleWaves(xz, wv.z);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
-  // The same height ramp as the ribbon's wave side, so the two surfaces
-  // agree inside the overlap band — otherwise a tall crest on the grid
-  // can outrun the dive-under margin and poke through the ribbon
   // Keyed by the same near-SDF that places both ribbons' seaward edges
   let sOff = coastSDF(xz);
   let sJ0 = -REST_DEPTH / u.slope;
-  var y = softClamp(w.height * (1.0 - smoothstep(sJ0 - SIM_BAND, sJ0, sOff)), ty);
+  // Full height like the ribbon's wave side, so the two surfaces agree at
+  // the overlap band's seaward edge; inside the band the dive-under ramp
+  // keeps the grid below the ribbon's blend toward the film
+  var y = softClamp(w.height, ty);
   // The dive-under ramp is LINEAR: a smoothstep starts flat, leaving the
   // grid coincident with the ribbon deep into the band, where differing
   // tessellations let coarse grid cells poke through as shading stripes.
@@ -180,11 +179,11 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   let chainWorld = coastP + coastN * (simRestS(b) + chain.x);
   let dispXZ = mix(matWorld + w.disp, chainWorld, sb);
   let ty = terrainHeight(dispXZ);
-  // The film carries no wave height: the vertical displacement ramps out
-  // across the handover band and is zero from the junction on, so water
-  // never wells up out of the beach — the surge shows through horizontal
-  // motion over the slope instead
-  let yWave = softClamp(w.height * (1.0 - sb), ty);
+  // The wave height carries at full strength up to the handover — the sb
+  // mix below already ramps it out toward the film, whose junction rides
+  // the (low-passed) local sea level itself; an extra (1 - sb) here would
+  // attenuate the band twice and sag it below both neighbours
+  let yWave = softClamp(w.height, ty);
   // Film thickness tapers from the junction's still-water column to zero
   // at the tip, so the junction sits exactly at sea level and at rest
   // terrain + thickness cancels to the flat sea. Seaward of the junction
@@ -320,7 +319,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // material sampling would compress them onto the wedge with a step at
   // the junction — so they survive onto the film without artifacts
   let rippleXZ = mix(in.gridXZ, in.world.xz, sbF);
-  var n = surfaceNormal(in.waveXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), shoreHeightScale(in.gridXZ) * (1.0 - sbF));
+  var n = surfaceNormal(in.waveXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), 1.0 - sbF);
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
   // which otherwise keeps fresnel and ripple glints alive landward of the film

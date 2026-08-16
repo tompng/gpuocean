@@ -130,14 +130,6 @@ fn colT(col: f32) -> f32 {
   return (col - f32(MAIN_COLS)) * u.islandArcStep;
 }
 
-// Waves flatten approaching the waterline: horizontal displacement over the
-// sloped terrain already reads as vertical motion there, and keeping the true
-// height out of the softmax floor stops wave volume sinking into the sand.
-// chain.js applies the same attenuation when marching for the wave edge.
-fn shoreHeightScale(xz: vec2f) -> f32 {
-  return mix(1.0, 0.35, smoothstep(-1.2, -0.15, terrainHeight(xz)));
-}
-
 fn simState(b: f32, col: f32) -> vec4f {
   let fx = clamp(b / (SIM_SPAN / f32(SIM_NODES - 1)), 0.0, f32(SIM_NODES - 1));
   let c = wrapCol(col);

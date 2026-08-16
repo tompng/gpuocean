@@ -8,8 +8,8 @@
 // balances the interior, so perturbations settle into piled-up states;
 // the pressure form pins the equilibrium to "surface flat" uniquely.
 // Rendering stays heightless — the sim contributes displacement only.
-// The seaward node is driven by the wave's horizontal orbital displacement
-// at the junction; the last node is the waterline tip.
+// The seaward node is driven by the local sea level riding the beach
+// slope; the last node is the waterline tip.
 const COLS = 256
 const NODES = 64
 const SUBSTEPS = 4
@@ -137,7 +137,7 @@ export class ChainSim {
     this.ve.fill(0)
   }
 
-  update(dt, params, sampleDispN, camX, camZ) {
+  update(dt, params, sampleLevel, camX, camZ) {
     const key = `${params.depth}`
     if (key !== this.key) {
       this.key = key
@@ -150,14 +150,13 @@ export class ChainSim {
       const steps = Math.round((tCam - this.zBase) / (160 / (MAIN_COLS - 1)))
       if (steps !== 0) this.lastShift = this.shiftWindow(steps)
       // The junction is positionally driven, so the chain's own inertia
-      // never filters the drive; the level term's short-period components
-      // get an explicit low-pass instead. The orbital term stays direct —
-      // its motion is the visible surge.
+      // never filters the drive; the level's short-period components get
+      // an explicit low-pass instead
       const kLP = 1 - Math.exp(-dt / LEVEL_TAU)
       for (let j = 0; j < COLS; j++) {
-        const d = sampleDispN(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1], this.normal[j * 2], this.normal[j * 2 + 1])
-        this.levelLP[j] += (d.level - this.levelLP[j]) * kLP
-        const xi = d.orb + this.levelLP[j]
+        const level = sampleLevel(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1])
+        this.levelLP[j] += (level - this.levelLP[j]) * kLP
+        const xi = this.levelLP[j]
         this.drive[j] = this.sJ + xi
         this.ve[j] = Math.max(-MAX_DRIVE_SPEED, Math.min((xi - this.prevXi[j]) / dt, MAX_DRIVE_SPEED))
         this.prevXi[j] = xi
@@ -244,45 +243,29 @@ function smoothSeg(a, offset, stride, j0, j1, wrap, k) {
   }
 }
 
-// The drive has two parts, both sampled at the junction (whose depth is
-// REST_DEPTH by construction, so the depth factors are constants):
-// - the orbital displacement projected onto the column's landward normal,
-//   with the same shallow amplification and waterline fade the vertex
-//   shader applies to the rendered displacement;
-// - the quasi-static shoreline response: the waterline rides the local sea
-//   LEVEL up the slope regardless of wave direction, which is what keeps
-//   the film moving where waves run parallel to the coast. The level gets
-//   the renderer's near-shore height attenuation at the junction depth.
-// The two are ~90 degrees out of phase, so they combine into a stronger,
-// phase-shifted swash rather than cancelling.
+// The drive is the quasi-static shoreline response: the waterline rides
+// the local sea LEVEL up the slope regardless of wave direction. The
+// orbital displacement is deliberately NOT part of it — it is ~90 degrees
+// ahead of the level and unfiltered it yanks the junction seaward at
+// every large crest-to-trough flip, over-stretching the film.
 const DRIVE_LEVEL = 1.0
-const LEVEL_TAU = 0.5
-const tH = Math.min(Math.max((-REST_DEPTH + 1.2) / 1.05, 0), 1)
-const H_ATT = 1 - 0.65 * tH * tH * (3 - 2 * tH)
+const LEVEL_TAU = 1.0
 
-export function sampleWaveDispN(x, z, nx, nz, noise, waveField, layers, chop, k0) {
-  const tex = noise.channels.disp
+export function sampleWaveLevel(x, z, noise, waveField, layers) {
   const texH = noise.channels.height
   const size = noise.size
   const copies = waveField.data
-  let dsum = 0
   let hsum = 0
   for (const l of layers) {
     const u0 = (x * l.dx + z * l.dz) * l.invL + l.su
     const v0 = (-x * l.dz + z * l.dx) * l.invL + l.sv
-    let s = 0
     let sh = 0
     for (let k = 0; k < 3; k++) {
-      s += copies[k * 4 + 2] * bilinearWrap(tex, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
       sh += copies[k * 4 + 2] * bilinearWrap(texH, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
     }
-    dsum += chop * l.amp * (l.dx * nx + l.dz * nz) * s
     hsum += l.amp * sh
   }
-  const amp = Math.min(Math.max(1 / Math.tanh(k0 * REST_DEPTH), 1), 2.5)
-  const t = Math.min(Math.max((-REST_DEPTH + 0.6) / 0.7, 0), 1)
-  const wSea = 1 - t * t * (3 - 2 * t)
-  return { orb: dsum * amp * wSea, level: hsum * H_ATT * DRIVE_LEVEL / SLOPE }
+  return hsum * DRIVE_LEVEL / SLOPE
 }
 
 function bilinearWrap(tex, size, u, v) {

@@ -40,9 +40,6 @@ fn waveSurface(xz: vec2f) -> vec2f {
     dzx += dir.x * dDdu * duvdz.x;
     dzz += dir.y * dDdu * duvdz.x;
   }
-  let hs = shoreHeightScale(xz);
-  height *= hs;
-  gradH *= hs;
   let eta = max(height * u.ampInv, 0.0);
   let ls = (eta * eta + 2.0 * eta) / ((1.0 + eta) * (1.0 + eta));
   dxx += u.leanX * ls * gradH.x;
