@@ -109,7 +109,7 @@ fn softClamp(height: f32, ty: f32) -> f32 {
 // sample is a function of world position.
 const WARP_CELL: f32 = 0.4;
 const WARP_LINEAR: f32 = 64.0;
-const WARP_GROWTH: f32 = 1.12;
+const WARP_GROWTH: f32 = 1.08;
 
 fn warpVertex(p: vec2f) -> vec3f {
   let snap = floor(u.cameraPos.xz / WARP_CELL + 0.5) * WARP_CELL;
