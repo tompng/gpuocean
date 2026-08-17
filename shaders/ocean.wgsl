@@ -502,7 +502,7 @@ fn warpVertex(p: vec2f) -> vec3f {
 // the grid's cell size at a given world distance from the camera: the
 // geometric cell growth sums to an exactly linear distance-cell relation
 fn warpCellAt(dist: f32) -> f32 {
-  return WARP_CELL + max((WARP_GROWTH - 1.0) * (dist - WARP_LINEAR), 0.0);
+  return u.warpCell + max((WARP_GROWTH - 1.0) * (dist - u.warpLinear), 0.0);
 }
 
 // Open-ocean grid: pure scroll waves. Across the shore ribbon's seaward
@@ -960,7 +960,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Level from the pixel's world footprint against the plate's tile size, so
   // the film's compressed material frame cannot pick a level that shimmers
   let plateLod = max(log2(max(length(fwidth(in.world.xz)) / (5.0 * u.noiseScale), 1e-6) * 1024.0), 0.0);
-  let patWave = foamPlate(in.gridXZ, waveFlow, foamAcc.r, plateLod);
+  let patWave = foamPlate(in.gridXZ, waveFlow, accR, plateLod);
   // The film's material band compresses onto the still-water wedge about
   // 14:1, so sampling the plate at raw band coordinates squashes every bubble
   // by that factor in the rendered image. Converting the band coordinate to
@@ -972,7 +972,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let bToWorld = clamp(in.stretch, restStretch * 0.6, restStretch * 3.0);
   let filmCover = filmAcc.b + filmAcc.r * 0.8;
   let patFilm = foamPlate(vec2f(in.st.x * bToWorld, colT(in.st.y)), vec2f(1.0, 0.0), filmCover, plateLod);
-  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * foamAcc.r));
+  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR));
   let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * filmCover));
   // The unbroken lip at the swash front: a thin water column carries a bright
   // rim independently of accumulation, gated so a dead-calm film grows none

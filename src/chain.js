@@ -274,7 +274,6 @@ export function sampleWaveLevel(x, z, noise, waveField, layers) {
 // by the displacement — close enough to decide which side of the surface a
 // point is on, which is all the camera needs.
 export function sampleWaveHeight(x, z, noise, waveField, layers) {
-  const texH = noise.channels.height
   const size = noise.size
   const copies = waveField.data
   let hsum = 0
@@ -282,8 +281,11 @@ export function sampleWaveHeight(x, z, noise, waveField, layers) {
     const u0 = (x * l.dx + z * l.dz) * l.invL + l.su
     const v0 = (-x * l.dz + z * l.dx) * l.invL + l.sv
     let sh = 0
-    for (let k = 0; k < 3; k++) {
-      sh += copies[k * 4 + 2] * bilinearWrap(texH, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
+    // One height field per scrolled copy, matching sampleWaveLevel above: the
+    // copies are fed from rotated noise variants, so they no longer share one
+    // field and a single texture would sample the wrong variant for two of them
+    for (let k = 0; k < noise.heights.length; k++) {
+      sh += copies[k * 4 + 2] * bilinearWrap(noise.heights[k], size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
     }
     hsum += l.amp * sh
   }

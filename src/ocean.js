@@ -53,7 +53,7 @@ const UNIFORM_LAYOUT = buildLayout([
   ['capHGrad', 1], ['rippleBias', 1], ['sssStrength', 1], ['ampInv', 1],
   ['seaDepth', 1], ['causticStrength', 1], ['causticScale', 1],
   ['leanX', 1], ['leanY', 1], ['foamThreshold', 1], ['foamRegion', 1],
-  ['foamDecay', 1], ['foamDecayG', 1], ['foamRise', 1], ['padB', 1],
+  ['foamDecay', 1], ['foamDecayG', 1], ['foamRise', 1], ['foamLife', 1],
   ['slope', 1], ['foamDecaySwallow', 1], ['simDt', 1], ['waveK', 1],
   ['padC', 1], ['foamScaleUnused', 1], ['simZBase', 1], ['simZShift', 1], ['simTCam', 1],
   ['camDepth', 1], ['lensR', 1],
@@ -428,6 +428,7 @@ export class Ocean {
     u[F.foamDecay] = Math.exp(-dt / life)
     u[F.foamDecayG] = Math.exp(-dt / (life * 0.25))
     u[F.foamRise] = Math.exp(-dt / FOAM_RISE)
+    u[F.foamLife] = params.foamLife
     u[F.slope] = SLOPE
     u[F.islandArcStep] = this.chain.islandArcStep
     u[F.simTCam] = this.chain.tCamSnap
