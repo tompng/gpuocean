@@ -111,7 +111,7 @@ const REFRACT_FORMAT = 'rgba16float'
 const PLATE_SEL = { blend: -1, sparse: 0, mid: 1, dense: 2, procedural: 3 }
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, cloudBuffer, format, opts = {}) {
     checkUniformLayout(code)
     this.device = device
     this.gridN = opts.gridN ?? GRID_N
@@ -137,6 +137,8 @@ export class Ocean {
         { binding: 10, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 12, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        // cloud deck, shared byte-for-byte with the sky pass
+        { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
       ],
     })
     const filmLayout = device.createBindGroupLayout({
@@ -221,6 +223,7 @@ export class Ocean {
       { binding: 1, resource: sampler },
       { binding: 2, resource: waveTexture.createView() },
       { binding: 3, resource: capTexture.createView() },
+      { binding: 15, resource: { buffer: cloudBuffer } },
     ]
     // One bind group per foam ping-pong texture
     const patternView = foamPattern.texture.createView()

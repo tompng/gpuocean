@@ -10,6 +10,7 @@ import { OrbitCamera } from './camera.js'
 import { invert } from './mat4.js'
 import { setupUI, setupFPS, QUALITY } from './ui.js'
 import { GPUTimer } from './gputimer.js'
+import { Clouds } from './clouds.js'
 import { setupNoiseDebug } from './debug.js'
 
 const canvas = document.getElementById('canvas')
@@ -74,17 +75,18 @@ async function main() {
   const coast = buildCoast(device)
   const chain = new ChainSim(device, coast)
   const filmFoam = new FoamSim(device, waveCommonCode + filmFoamCode, [128, 256])
+  const clouds = new Clouds(device)
   const oceanCodeFull = atmosphereCode + waveCommonCode + oceanCode
   const buildOcean = q => new Ocean(device, oceanCodeFull, waveField.texture, capField.texture,
     foam.views, filmFoam.views, foamPattern, foamPlates, chain.view, chain.coastView,
-    coast.sdfView, coast.mainTableView, format,
+    coast.sdfView, coast.mainTableView, clouds.buffer, format,
     { gridN: QUALITY[q].gridN, ribbonCells: QUALITY[q].ribbonCells,
       cell: QUALITY[q].cell, linearCells: QUALITY[q].linearCells })
   let ocean = buildOcean('high')
   foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
   filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
-  const sky = new Sky(device, atmosphereCode + skyCode, format)
+  const sky = new Sky(device, atmosphereCode + skyCode, format, clouds.buffer)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
   const reportFPS = setupFPS()
@@ -156,6 +158,7 @@ async function main() {
     const viewProj = camera.viewProj(w / h, near)
     const lensR = 0.02 + params.waterlineThickness * 0.5
     const { lodScale, maxLayers } = QUALITY[params.quality]
+    clouds.update(dt, params, eye, h, Math.PI / 3)
     // Exactly once per frame: this advances the wave phases
     ocean.update(waveDt, params, noise, capNoise, viewProj, eye, sunDir, moonDir, camDepth, lodScale, maxLayers)
 

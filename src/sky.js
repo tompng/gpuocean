@@ -1,5 +1,5 @@
 export class Sky {
-  constructor(device, code, format, opts = {}) {
+  constructor(device, code, format, cloudBuffer, opts = {}) {
     this.device = device
     const module = device.createShaderModule({ code })
     this.pipeline = device.createRenderPipeline({
@@ -15,7 +15,11 @@ export class Sky {
     })
     this.bindGroup = device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.uniform } }],
+      entries: [
+        { binding: 0, resource: { buffer: this.uniform } },
+        // the same buffer the ocean binds, so the reflected deck cannot differ
+        { binding: 15, resource: { buffer: cloudBuffer } },
+      ],
     })
     this.data = new Float32Array(36)
   }

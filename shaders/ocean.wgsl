@@ -474,7 +474,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // highlight across the water at dusk that belongs to neither.
   let specSun = mix(8.0, 4.5, sunWarmth(SKY)) * pow(max(dot(r, SKY.sunDir), 0.0), 600.0) * SKY.day;
   let specMoon = 5.0 * pow(max(dot(r, SKY.moonDir), 0.0), 600.0) * SKY.nightMix * SKY.moonLit;
-  let spec = sunTint(SKY) * (specSun + specMoon);
+  let spec = sunTint(SKY) * (specSun * cloudShade(in.world, SKY) + specMoon);
   let fCenter = vec2f(u.foamCX, u.foamCZ);
   let fuv = (in.gridXZ - fCenter) / (2.0 * u.foamRegion) + 0.5;
   let edgeFade = 1.0 - smoothstep(0.85, 1.0, length(in.gridXZ - fCenter) / u.foamRegion);
@@ -576,12 +576,15 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Direct sunlight in the water column fades as the sun drops; the floor
   // stands in for diffuse sky light
   let sunLev = sunLevel(SKY);
+  // one shadow lookup per fragment, applied per term below
+  let shade = cloudShade(in.world, SKY);
   var water = mix(waterHue(u.sTurbidity, u.chlorophyll * u.sChlorophyll) * 0.16, sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
-  water *= sunLev;
-  var color = mix(water, skyColor(r, SKY), fresnel) + spec;
+  water *= sunLev * mix(1.0, shade, CLOUD_DIRECT_WATER);
+  var color = mix(water, skyColorRough(r, SKY, 16.0), fresnel) + spec;
   // Dry sand above the runup line: matte, no fresnel reflection or caustics
-  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev * (0.55 + 0.45 * max(n.y, 0.0));
+  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev
+                * mix(1.0, shade, CLOUD_DIRECT_SAND) * (0.55 + 0.45 * max(n.y, 0.0));
   color = mix(sandMatte, color, waterM);
   // Seen from underneath, the whole sky squeezes into Snell's window — the
   // ~97 degree cone about vertical set by the critical angle — and outside it
@@ -594,28 +597,32 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the surface no fragment can be submerged, so this whole branch is skipped
   // rather than paid for on every above-water pixel. Being uniform, the branch
   // may legally contain texture samples with implicit derivatives.
-  var nUW = n;
+  // The whole window is inside ONE uniform branch on camDepth/lensR: with the
+  // eye clear of the surface no fragment can be submerged, so above water this
+  // skips a chop sample AND a full cloud march through skyColorRough — the
+  // window's sky lookup costs the same as the mirror reflection's, and paying
+  // for it on every above-water pixel was most of the deck's cost.
   if (u.camDepth > -u.lensR) {
     let chop = textureSample(capTex, samp, in.world.xz * 0.8 + vec2f(0.031, -0.019) * u.time).zw
              * (0.28 * u.rippleStrength);
-    nUW = normalize(n + vec3f(chop.x, 0.0, chop.y));
+    let nUW = normalize(n + vec3f(chop.x, 0.0, chop.y));
+    let tRay = refract(-v, nUW, WATER_TO_AIR);
+    let tir = dot(tRay, tRay) < 1e-6;
+    // The mirrored ray needs a floor hit: march the reflection down to the
+    // flat basin and tint it by the path
+    let mRay = reflect(-v, nUW);
+    let mPath = min((in.world.y + u.seaDepth) / max(-mRay.y, 0.05), 400.0);
+    let mirror = mix(waterFogAlong(mRay, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll), sand * lightTint * sunLev,
+                     exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * mPath));
+    // Fresnel on the air side; at and past the critical angle it saturates to a
+    // full mirror, which is what closes the rim of the window
+    let cosAir = clamp(dot(tRay, -nUW), 0.0, 1.0);
+    let fresUp = select(0.02 + 0.98 * pow(1.0 - cosAir, 5.0), 1.0, tir);
+    // skyColor already carries the sun disc, so the window shows the sun on its
+    // own; the above-water spec lobe belongs to the other side of the interface
+    let underside = mix(skyColorRough(tRay, SKY, 3.0), mirror, fresUp);
+    color = mix(color, underside, uw);
   }
-  let tRay = refract(-v, nUW, WATER_TO_AIR);
-  let tir = dot(tRay, tRay) < 1e-6;
-  // Both the mirrored ray and the sky ray need a floor hit for the mirror
-  // term: march the reflection down to the flat basin and tint by the path
-  let mRay = reflect(-v, nUW);
-  let mPath = min((in.world.y + u.seaDepth) / max(-mRay.y, 0.05), 400.0);
-  let mirror = mix(waterFogAlong(mRay, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll), sand * lightTint * sunLev,
-                   exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * mPath));
-  // Fresnel on the air side; at and past the critical angle it saturates to a
-  // full mirror, which is what closes the rim of the window
-  let cosAir = clamp(dot(tRay, -nUW), 0.0, 1.0);
-  let fresUp = select(0.02 + 0.98 * pow(1.0 - cosAir, 5.0), 1.0, tir);
-  // skyColor already carries the sun disc, so the window shows the sun on its
-  // own; the above-water spec lobe belongs to the other side of the interface
-  let underside = mix(skyColor(tRay, SKY), mirror, fresUp);
-  color = mix(color, underside, uw);
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
   // so patches fragment into clumps before vanishing
@@ -659,11 +666,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // density back in as shading so its bubble structure survives where the
   // threshold has stopped discriminating.
   let patLit = max(patWave * maskWave, patFilm * maskFilm);
-  let foamColor = lightTint * mix(0.45, 1.0, sunLev) * (0.72 + 0.22 * max(n.y, 0.0))
+  let foamColor = lightTint * mix(0.45, 1.0, sunLev) * mix(1.0, shade, CLOUD_DIRECT_FOAM)
+                * (0.72 + 0.22 * max(n.y, 0.0))
                 * (0.60 + 0.55 * patLit);
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);
-  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), SKY), fog);
+  let air = mix(color, skyColorRough(normalize(vec3f(-v.x, 0.02, -v.z)), SKY, 40.0), fog);
   // Underwater the aerial perspective is the water column itself, and it
   // closes in orders of magnitude faster
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
@@ -704,7 +712,8 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   let n = normalize(vec3f(-hx / (2.0 * e), 1.0, -hz / (2.0 * e)));
   let lightTint = mix(vec3f(1.0), sunTint(SKY), 0.6);
   let sunLev = sunLevel(SKY);
-  var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev * (0.55 + 0.45 * max(n.y, 0.0));
+  let shade = cloudShade(in.world, SKY);
+  var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev * mix(1.0, shade, CLOUD_DIRECT_SAND) * (0.55 + 0.45 * max(n.y, 0.0));
   let dist = distance(u.cameraPos, in.world);
   let v = normalize(u.cameraPos - in.world);
   // Submerged, this same mesh IS the basin floor: daylight reaches it filtered
@@ -718,7 +727,7 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
             * waterAmbient(column, SKY, waterSigma(u.uwTurbidity, u.chlorophyll)) * (0.55 + 0.45 * max(n.y, 0.0));
   color = mix(color, floor, uw);
   let fog = 1.0 - exp(-dist * 3e-5);
-  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), SKY), fog);
+  let air = mix(color, skyColorRough(normalize(vec3f(-v.x, 0.02, -v.z)), SKY, 40.0), fog);
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
   var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll);
   if (u.camDepth > -u.lensR) {
