@@ -125,6 +125,12 @@ fn warpVertex(p: vec2f) -> vec3f {
   return vec3f(snap + p * (rw / r), WARP_CELL * g);
 }
 
+// the grid's cell size at a given world distance from the camera: the
+// geometric cell growth sums to an exactly linear distance-cell relation
+fn warpCellAt(dist: f32) -> f32 {
+  return WARP_CELL + max((WARP_GROWTH - 1.0) * (dist - WARP_LINEAR), 0.0);
+}
+
 // Open-ocean grid: pure scroll waves. Across the shore ribbon's seaward
 // band it dives below the sand and is cut just past the junction, so the
 // ribbon always covers it; at the band's seaward edge both meshes evaluate
@@ -185,7 +191,12 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   // band, the faded segment ends), compressed anchors would smear the
   // world foam into streaks and kink the normals.
   let matWorld = coastP + coastN * (-REST_DEPTH / u.slope + b);
-  let w = sampleWaves(matWorld, cell);
+  // The ribbon's own lattice stays fine near the coast no matter where the
+  // camera is, so the vs height attenuation also takes the open grid's cell
+  // at this distance — otherwise a far coast keeps full wave height against
+  // the grid's flattened surface and the seam shows a step
+  let cellW = max(cell, warpCellAt(distance(u.cameraPos.xz, matWorld)));
+  let w = sampleWaves(matWorld, cellW);
   let sb = simBlend(b);
   let chain = simState(b, col);
   let chainWorld = coastP + coastN * (simRestS(b) + chain.x);
