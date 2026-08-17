@@ -10,21 +10,25 @@ import { floatToHalf } from './gpu.js'
 // Built in the frequency domain, which makes the band orientation a free
 // parameter with exact tiling: the transfer is evaluated at frequencies
 // rotated by the variant's angle, and the displacement cumsum divides by
-// 1 - e^{-iω} along the rotated travel axis. Three independent variants
-// (straight and ±ANGLE) feed the wave field's three scrolled copies, so a
-// still frame shows 3 pattern orientations per layer instead of one.
-const VARIANT_ANGLE = 10 * Math.PI / 180
-const VARIANT_SEEDS = [23456, 12345, 34567]
+// 1 - e^{-iω} along the rotated travel axis. Five independent variants
+// (0, ±5, ±10 degrees) feed the wave field's five scrolled copies. The ±10
+// cap keeps a single-swell look reachable: the copies fill a layer's ±10
+// fan seamlessly, and the layer spread then slides whole fans apart.
+// Many distinct orientations also mask the tile repetition, which is what
+// allows the smaller texture (repeat length halves against 512).
+const VARIANT_ANGLES = [-10, -5, 0, 5, 10].map(a => a * Math.PI / 180)
+const VARIANT_SEEDS = [23456, 45678, 12345, 34567, 56789]
 
 export function generateGravityNoiseSet(device, opts = {}) {
-  const size = opts.size ?? 512
-  const angles = opts.angles ?? [-VARIANT_ANGLE, 0, VARIANT_ANGLE]
+  const size = opts.size ?? 256
+  const angles = opts.angles ?? VARIANT_ANGLES
   const variants = angles.map((angle, i) =>
     gravityChannels(size, opts, VARIANT_SEEDS[i], angle))
   // one dispGradPerTexel serves all variants, so every d channel divides by
   // the SAME sigma (the straight variant's); the ~1% per-variant variance
   // difference is harmless, a mismatched gradient scale is not
-  const sigmaD = variants[1].sigmaD
+  const center = angles.indexOf(0)
+  const sigmaD = variants[center].sigmaD
   const textures = []
   const heights = []
   for (const v of variants) {
@@ -33,11 +37,11 @@ export function generateGravityNoiseSet(device, opts = {}) {
     textures.push(createNoiseTexture(device, size, v.h, v.d, hx, hy))
     heights.push(v.h)
   }
-  const [hx0] = gradients(variants[1].h, size)
+  const [hx0] = gradients(variants[center].h, size)
   return {
     textures,
     size,
-    wavesPerTile: wavesPerTile(variants[1].h, hx0, size),
+    wavesPerTile: wavesPerTile(variants[center].h, hx0, size),
     dispGradPerTexel: -1 / sigmaD,
     heights,
     variants: angles.map((angle, i) => ({

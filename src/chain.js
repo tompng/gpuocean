@@ -259,7 +259,7 @@ export function sampleWaveLevel(x, z, noise, waveField, layers) {
     const u0 = (x * l.dx + z * l.dz) * l.invL + l.su
     const v0 = (-x * l.dz + z * l.dx) * l.invL + l.sv
     let sh = 0
-    for (let k = 0; k < 3; k++) {
+    for (let k = 0; k < noise.heights.length; k++) {
       sh += copies[k * 4 + 2] * bilinearWrap(noise.heights[k], size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
     }
     hsum += l.amp * sh

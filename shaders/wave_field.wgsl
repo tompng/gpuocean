@@ -1,6 +1,6 @@
 struct Uniforms {
   // xy: uv offset, z: weight
-  copies: array<vec4f, 3>,
+  copies: array<vec4f, 5>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -9,6 +9,8 @@ struct Uniforms {
 @group(0) @binding(2) var noiseTex0: texture_2d<f32>;
 @group(0) @binding(3) var noiseTex1: texture_2d<f32>;
 @group(0) @binding(4) var noiseTex2: texture_2d<f32>;
+@group(0) @binding(5) var noiseTex3: texture_2d<f32>;
+@group(0) @binding(6) var noiseTex4: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -29,5 +31,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   var acc = u.copies[0].z * textureSampleLevel(noiseTex0, samp, in.uv + u.copies[0].xy, 0.0);
   acc += u.copies[1].z * textureSampleLevel(noiseTex1, samp, in.uv + u.copies[1].xy, 0.0);
   acc += u.copies[2].z * textureSampleLevel(noiseTex2, samp, in.uv + u.copies[2].xy, 0.0);
+  acc += u.copies[3].z * textureSampleLevel(noiseTex3, samp, in.uv + u.copies[3].xy, 0.0);
+  acc += u.copies[4].z * textureSampleLevel(noiseTex4, samp, in.uv + u.copies[4].xy, 0.0);
   return acc;
 }
