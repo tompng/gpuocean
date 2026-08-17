@@ -38,6 +38,8 @@ const FOAM_RISE = 0.08
 // Uniforms struct size in floats; must stay a multiple of 4 (16-byte struct
 // alignment) and match the tail of Uniforms in wave_common.wgsl
 const UNIFORM_FLOATS = 196
+// Linear radiance, so the surface can attenuate before its own tonemap
+const REFRACT_FORMAT = 'rgba16float'
 
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, format, opts = {}) {
@@ -60,6 +62,8 @@ export class Ocean {
         { binding: 8, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 10, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 12, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
       ],
     })
     const filmLayout = device.createBindGroupLayout({
@@ -96,6 +100,14 @@ export class Ocean {
     this.fillIslandPipeline = makePipeline('vs_island', 'fs', 'triangle-list')
     this.wireIslandPipeline = makePipeline('vs_island', 'fs_wire', 'line-list')
     this.fillLandPipeline = makePipeline('vs_land', 'fs_land', 'triangle-list')
+    this.refractPipeline = device.createRenderPipeline({
+      layout: base.layout,
+      vertex: vertex('vs_land'),
+      fragment: { module, entryPoint: 'fs_land_refract', targets: [{ format: REFRACT_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+      multisample: { count: 1 },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    })
     this.wireLandPipeline = makePipeline('vs_land', 'fs_wire', 'line-list')
     this.bindLayout = bindLayout
     this.filmGroups = filmFoamViews.map(view => device.createBindGroup({
@@ -107,6 +119,23 @@ export class Ocean {
       size: UNIFORM_FLOATS * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
+    // Screen-space taps must clamp: the shared sampler repeats, which would
+    // wrap an offset tap from one screen edge to the opposite one
+    const refrSampler = device.createSampler({
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    })
+    this.refrSampler = refrSampler
+    // WebGPU rejects a texture that is both a colour attachment and a bound
+    // resource in the same pass, so the refraction pass gets its own bind
+    // groups carrying a dummy view at binding 9
+    this.dummyRefr = device.createTexture({
+      size: [1, 1],
+      format: REFRACT_FORMAT,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    }).createView()
     const sampler = device.createSampler({
       addressModeU: 'repeat',
       addressModeV: 'repeat',
@@ -122,19 +151,25 @@ export class Ocean {
     ]
     // One bind group per foam ping-pong texture
     const patternView = foamPattern.texture.createView()
-    this.bindGroups = foamViews.map(view => device.createBindGroup({
+    const plateView = foamPlates.texture.createView({ dimension: '2d-array' })
+    this.foamViews = foamViews
+    this.makeBindGroups = refrView => foamViews.map(view => device.createBindGroup({
       layout: this.bindLayout,
       entries: [
         ...entries,
         { binding: 4, resource: view },
         { binding: 5, resource: patternView },
-        { binding: 6, resource: foamPlates.texture.createView({ dimension: '2d-array' }) },
+        { binding: 6, resource: plateView },
         { binding: 7, resource: simView },
         { binding: 8, resource: coastView },
         { binding: 9, resource: sdfView },
         { binding: 10, resource: mainTableView },
+        { binding: 11, resource: refrView },
+        { binding: 12, resource: refrSampler },
       ],
     }))
+    this.refrBindGroups = this.makeBindGroups(this.dummyRefr)
+    this.bindGroups = this.refrBindGroups
 
     const [tri, line] = buildIndices(this.gridN, this.gridN)
     this.triIndices = createIndexBuffer(device, tri)
@@ -164,7 +199,25 @@ export class Ocean {
     this.layerCache = []
   }
 
-  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex, filmIndex, camDepth, lodScale) {
+  // Bind the refraction target for the main pass. Called on resize.
+  setRefractionTarget(view) {
+    this.bindGroups = this.makeBindGroups(view)
+  }
+
+  // Draws only the sea floor, in linear radiance, for the surface to sample
+  drawRefraction(pass, foamIndex, filmIndex) {
+    pass.setBindGroup(0, this.refrBindGroups[foamIndex])
+    pass.setBindGroup(1, this.filmGroups[filmIndex])
+    pass.setPipeline(this.refractPipeline)
+    pass.setVertexBuffer(0, this.vertexBuffer)
+    pass.setIndexBuffer(this.triIndices, 'uint32')
+    pass.drawIndexed(this.triCount)
+  }
+
+  // Advances time and writes the uniform. Must run exactly once per frame,
+  // before any pass, or the wave phases integrate twice and the ocean runs at
+  // double speed.
+  update(dt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale) {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
@@ -307,6 +360,9 @@ export class Ocean {
     u[164] = 1
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
+  }
+
+  draw(pass, params, foamIndex, filmIndex) {
     const wire = params.wireframe
     pass.setBindGroup(0, this.bindGroups[foamIndex])
     pass.setBindGroup(1, this.filmGroups[filmIndex])

@@ -3,6 +3,15 @@ export async function initWebGPU(canvas) {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
   if (!adapter) throw new Error('No WebGPU adapter found')
   const device = await adapter.requestDevice()
+  // A validation error otherwise only reaches the console, where a per-frame
+  // pass failure scrolls past as an unattributed warning and the canvas just
+  // goes black. Surface the first one in the error panel instead.
+  device.addEventListener('uncapturederror', e => {
+    const el = document.getElementById('error')
+    if (el.style.display === 'grid') return
+    el.style.display = 'grid'
+    el.textContent = `WebGPU: ${e.error.message}`
+  })
   const context = canvas.getContext('webgpu')
   const format = navigator.gpu.getPreferredCanvasFormat()
   context.configure({ device, format, alphaMode: 'opaque' })

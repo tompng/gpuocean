@@ -6,6 +6,10 @@
 @group(0) @binding(6) var foamPlates: texture_2d_array<f32>;
 // Coast table: per column (P.x, P.z, N.x, N.z), written by chain.js
 @group(0) @binding(8) var coastTex: texture_2d<f32>;
+// Linear radiance of the submerged scene, rendered in its own pass. rgb is the
+// lit floor, a is a submerged mask used to reject taps that land above water.
+@group(0) @binding(9) var refrTex: texture_2d<f32>;
+@group(0) @binding(10) var refrSamp: sampler;
 @group(1) @binding(0) var filmFoamTex: texture_2d<f32>;
 
 struct VSOut {
@@ -151,6 +155,9 @@ fn softClamp(height: f32, ty: f32) -> f32 {
 // near vertices sit on a fixed world lattice (no swimming); far vertices
 // slide with the camera, which is invisible because every field they
 // sample is a function of world position.
+// Hard cap on the screen-space refraction offset, in uv units
+const REFR_CLAMP: f32 = 0.08;
+
 const WARP_CELL: f32 = 0.4;
 const WARP_LINEAR: f32 = 64.0;
 const WARP_GROWTH: f32 = 1.08;
@@ -500,12 +507,41 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let trans = exp(-waterSigma(u.sTurbidity, u.chlorophyll * u.sChlorophyll) * pathLen);
   // Sampled at the refracted bottom point so the web swims with the surface;
   // defocus fades it with column depth
-  let bottomXZ = in.world.xz + refr.xz * (column * lateral);
+  let tHit = column * lateral * u.distortionScale;
+  let bottomXZ = in.world.xz + refr.xz * tHit;
   let web = causticWeb(bottomXZ);
   // Caustics need some water column to focus in; a centimeters-thin film
   // (or the residual softmax offset on dry sand) must not carry the web
   let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * smoothstep(0.04, 0.25, column);
-  let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
+  // Analytic flat bottom, kept as the fallback wherever the screen-space tap
+  // has nothing valid to say
+  let sandA = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
+  // Screen-space refraction. The offset is the parallax between where the
+  // refracted ray actually lands on the floor and this fragment's own pixel —
+  // view-consistent by construction, shrinking with distance through the
+  // perspective divide, and scaling with the water column for free because
+  // tHit is proportional to it: a centimetres-thin film barely offsets, an 8 m
+  // column offsets a lot, with no tuning constant.
+  let dims = vec2f(textureDimensions(refrTex, 0));
+  let uvSelf = in.clip.xy / dims;
+  let hitClip = u.viewProj * vec4f(bottomXZ.x, in.world.y - column, bottomXZ.y, 1.0);
+  var uvTap = uvSelf;
+  if (hitClip.w > 1e-4) {
+    let uvHit = (hitClip.xy / hitClip.w) * vec2f(0.5, -0.5) + 0.5;
+    // Near the horizon tHit grows faster than the perspective divide shrinks
+    // it, so cap the offset or a grazing tap flies across the frame
+    var d = (uvHit - uvSelf) * u.distortionStrength;
+    let dl = length(d);
+    if (dl > REFR_CLAMP) { d *= REFR_CLAMP / dl; }
+    uvTap = uvSelf + d;
+  }
+  // Explicit LOD: the screen-space uv is discontinuous across ripple detail,
+  // and there is a discard earlier in this shader
+  let refrBase = textureSampleLevel(refrTex, refrSamp, uvSelf, 0.0);
+  let refrTap = textureSampleLevel(refrTex, refrSamp, clamp(uvTap, vec2f(0.0), vec2f(1.0)), 0.0);
+  // Retreat to the unoffset tap where the offset one landed above water, then
+  // to the analytic bottom where even that is invalid
+  let sand = mix(mix(sandA, refrBase.rgb, refrBase.a), refrTap.rgb, refrTap.a);
   // -v is the ray from the eye toward this fragment
   let uw = underwaterAt(-v, u.camDepth, u.lensR);
   let lightTint = mix(vec3f(1.0), sunTint(SKY), 0.6);
@@ -629,6 +665,24 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
+}
+
+// The submerged scene, in linear radiance with no fog, tonemap or gamma, so
+// the surface can attenuate it by Beer-Lambert before its own tonemap. It
+// reproduces exactly the expression the surface calls `sand`, so at zero
+// offset the swap is a visual no-op.
+//
+// fs_land cannot be reused: its submerged branch is gated on the camera being
+// underwater, which is false exactly when refraction is visible.
+@fragment
+fn fs_land_refract(in: VSOut) -> @location(0) vec4f {
+  let column = max(-in.world.y, 0.0);
+  let dist = distance(u.cameraPos, in.world);
+  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
+  let lit = 0.85 + focus * (1.6 * causticWeb(in.gridXZ) - 0.18);
+  // Soft over ~15 cm of terrain height so the mask ramps instead of popping
+  let submerged = smoothstep(0.02, 0.15, column);
+  return vec4f(vec3f(0.86, 0.78, 0.58) * lit, submerged);
 }
 
 @fragment

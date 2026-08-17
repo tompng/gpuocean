@@ -62,7 +62,8 @@ const SPEC = [
       { id: 'uwTurbidity', label: 'turbidity', min: 0, max: 1, step: 0.01, value: 0.35 },
       { id: 'uwFog', label: 'fog', min: 0, max: 3, step: 0.05, value: 1 },
       { id: 'uwCaustics', label: 'caustics', min: 0, max: 3, step: 0.05, value: 1.2 },
-      { id: 'distortionStrength', min: 0, max: 2, step: 0.02, value: 0.4 },
+      // 1.0 is the true refracted parallax; below that under-refracts
+      { id: 'distortionStrength', min: 0, max: 2, step: 0.02, value: 1 },
       { id: 'distortionScale', min: 0.1, max: 4, step: 0.05, value: 1 },
       { id: 'particleDensity', min: 0, max: 2, step: 0.02, value: 0.35 },
       { id: 'rippleStrength', min: 0, max: 2, step: 0.02, value: 0.6 },

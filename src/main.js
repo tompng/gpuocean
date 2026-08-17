@@ -66,6 +66,8 @@ async function main() {
 
   let depth = null
   let msaa = null
+  let refrColor = null
+  let refrDepth = null
   let width = 0
   let height = 0
   let lastTime = performance.now()
@@ -84,6 +86,8 @@ async function main() {
       canvas.height = h
       depth?.destroy()
       msaa?.destroy()
+      refrColor?.destroy()
+      refrDepth?.destroy()
       depth = device.createTexture({
         size: [w, h],
         format: 'depth24plus',
@@ -96,6 +100,19 @@ async function main() {
         sampleCount: 4,
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
       })
+      // Single-sampled: this image exists to be sampled at a wobbling offset
+      // and then multiplied by extinction, so 4x coverage would be thrown away
+      refrColor = device.createTexture({
+        size: [w, h],
+        format: 'rgba16float',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      })
+      refrDepth = device.createTexture({
+        size: [w, h],
+        format: 'depth24plus',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      })
+      ocean.setRefractionTarget(refrColor.createView())
     }
 
     const waveDt = params.pause ? 0 : dt
@@ -107,6 +124,22 @@ async function main() {
     chain.update(waveDt, params, (x, z) =>
       sampleWaveLevel(x, z, noise, waveField, ocean.layerCache),
       camera.target[0], camera.target[2])
+    const sunDir = sunDirection(params.timeOfDay, params.latitude, params.azimuth)
+    camera.update(dt)
+    const eye = camera.eye
+    // Which side of the surface the camera is on, in meters. The waterline
+    // rides the waves, so this is sampled against the live wave height rather
+    // than mean sea level — ducking under a passing crest counts as submerged
+    const camDepth = sampleWaveHeight(eye[0], eye[2], noise, waveField, ocean.layerCache) - eye[1]
+    // Pull the near plane in as the surface closes on the eye, so the water
+    // right at the lens still renders instead of being clipped to a hole
+    const near = Math.min(Math.max(0.35 * Math.abs(camDepth), 0.02), 0.5)
+    const viewProj = camera.viewProj(w / h, near)
+    const lensR = 0.02 + params.waterlineThickness * 0.5
+    const lodScale = QUALITY[params.quality].lodScale
+    // Exactly once per frame: this advances the wave phases
+    ocean.update(waveDt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale)
+
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)
@@ -117,6 +150,26 @@ async function main() {
       foam.render(encoder)
       filmFoam.render(encoder)
     }
+    // The submerged scene, drawn first into its own linear target so the
+    // surface can refract it. storeOp must be 'store' — the other passes here
+    // all discard, and copying that habit yields a garbage texture silently.
+    const refrPass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: refrColor.createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      }],
+      depthStencilAttachment: {
+        view: refrDepth.createView(),
+        depthLoadOp: 'clear',
+        depthStoreOp: 'discard',
+        depthClearValue: 1,
+      },
+    })
+    ocean.drawRefraction(refrPass, foam.index, filmFoam.index)
+    refrPass.end()
+
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
         view: msaa.createView(),
@@ -132,21 +185,8 @@ async function main() {
         depthClearValue: 1,
       },
     })
-    const sunDir = sunDirection(params.timeOfDay, params.latitude, params.azimuth)
-    camera.update(dt)
-    const eye = camera.eye
-    // Which side of the surface the camera is on, in meters. The waterline
-    // rides the waves, so this is sampled against the live wave height rather
-    // than mean sea level — ducking under a passing crest counts as submerged
-    const camDepth = sampleWaveHeight(eye[0], eye[2], noise, waveField, ocean.layerCache) - eye[1]
-    // Pull the near plane in as the surface closes on the eye, so the water
-    // right at the lens still renders instead of being clipped to a hole
-    const near = Math.min(Math.max(0.35 * Math.abs(camDepth), 0.02), 0.5)
-    const viewProj = camera.viewProj(w / h, near)
-    const lensR = 0.02 + params.waterlineThickness * 0.5
-    const lodScale = QUALITY[params.quality].lodScale
     sky.render(pass, invert(viewProj), eye, sunDir, camDepth, lensR, params.uwTurbidity, params.chlorophyll, params)
-    ocean.render(pass, waveDt, params, noise, capNoise, viewProj, eye, sunDir, foam.index, filmFoam.index, camDepth, lodScale)
+    ocean.draw(pass, params, foam.index, filmFoam.index)
     pass.end()
     device.queue.submit([encoder.finish()])
     requestAnimationFrame(frame)
