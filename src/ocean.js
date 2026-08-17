@@ -37,14 +37,17 @@ const RIBBON_CELLS = 140
 const FOAM_RISE = 0.08
 // Uniforms struct size in floats; must stay a multiple of 4 (16-byte struct
 // alignment) and match the tail of Uniforms in wave_common.wgsl
-const UNIFORM_FLOATS = 196
+const UNIFORM_FLOATS = 200
 // Linear radiance, so the surface can attenuate before its own tonemap
 const REFRACT_FORMAT = 'rgba16float'
 
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, format, opts = {}) {
     this.device = device
-    this.gridN = GRID_N
+    this.gridN = opts.gridN ?? GRID_N
+    const ribbonCells = opts.ribbonCells ?? RIBBON_CELLS
+    this.cell = opts.cell ?? CELL
+    this.linearCells = opts.linearCells ?? LINEAR_CELLS
     const sampleCount = opts.sampleCount ?? 4
     const module = device.createShaderModule({ code })
     // The grid and ribbon pipelines share one explicit layout so a single
@@ -176,21 +179,21 @@ export class Ocean {
     this.lineIndices = createIndexBuffer(device, line)
     this.triCount = tri.length
     this.lineCount = line.length
-    this.vertexBuffer = createVertexBuffer(device, buildVertices(this.gridN))
+    this.vertexBuffer = createVertexBuffer(device, buildVertices(this.gridN, this.cell))
 
-    const [ribTri, ribLine] = buildIndices(RIBBON_CELLS, this.gridN)
+    const [ribTri, ribLine] = buildIndices(ribbonCells, this.gridN)
     this.ribbonTriIndices = createIndexBuffer(device, ribTri)
     this.ribbonLineIndices = createIndexBuffer(device, ribLine)
     this.ribbonTriCount = ribTri.length
     this.ribbonLineCount = ribLine.length
-    this.ribbonVertexBuffer = createVertexBuffer(device, buildRibbonVertices(RIBBON_CELLS, this.gridN))
+    this.ribbonVertexBuffer = createVertexBuffer(device, buildRibbonVertices(ribbonCells, this.gridN, this.cell, this.linearCells))
 
-    const [islTri, islLine] = buildIndices(RIBBON_CELLS, ISLAND_COLS * 4)
+    const [islTri, islLine] = buildIndices(ribbonCells, ISLAND_COLS * 4)
     this.islandTriIndices = createIndexBuffer(device, islTri)
     this.islandLineIndices = createIndexBuffer(device, islLine)
     this.islandTriCount = islTri.length
     this.islandLineCount = islLine.length
-    this.islandVertexBuffer = createVertexBuffer(device, buildIslandVertices(RIBBON_CELLS, ISLAND_COLS))
+    this.islandVertexBuffer = createVertexBuffer(device, buildIslandVertices(ribbonCells, ISLAND_COLS))
 
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
@@ -217,13 +220,14 @@ export class Ocean {
   // Advances time and writes the uniform. Must run exactly once per frame,
   // before any pass, or the wave phases integrate twice and the ocean runs at
   // double speed.
-  update(dt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale) {
+  update(dt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale, maxLayers) {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
     u[16] = eye[0]; u[17] = eye[1]; u[18] = eye[2]; u[19] = this.time
     u[20] = sunDir[0]; u[21] = sunDir[1]; u[22] = sunDir[2]
-    const count = Math.round(params.layers)
+    // the quality cap bounds the per-vertex and per-fragment layer loops
+    const count = Math.min(Math.round(params.layers), maxLayers)
     u[24] = count
     u[25] = params.choppiness
     u[26] = noise.size * noise.dispGradPerTexel
@@ -354,6 +358,8 @@ export class Ocean {
     u[194] = params.skyTurbidity
     u[195] = params.rayleigh
     u[196] = params.intensity
+    u[197] = this.cell
+    u[198] = this.linearCells * this.cell
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
@@ -385,23 +391,23 @@ export class Ocean {
   }
 }
 
-function warpAxis(i) {
+function warpAxis(i, cell = CELL, linearCells = LINEAR_CELLS) {
   const a = Math.abs(i)
   const sign = Math.sign(i)
-  if (a <= LINEAR_CELLS) return sign * a * CELL
-  return sign * (LINEAR_CELLS * CELL + CELL * (CELL_GROWTH ** (a - LINEAR_CELLS) - 1) / (CELL_GROWTH - 1))
+  if (a <= linearCells) return sign * a * cell
+  return sign * (linearCells * cell + cell * (CELL_GROWTH ** (a - linearCells) - 1) / (CELL_GROWTH - 1))
 }
 
 // Uniform lattice in pre-warp space; the vertex shader warps it around the
 // camera (see warpVertex in ocean.wgsl), so the buffer never changes
-function buildVertices(n) {
+function buildVertices(n, cell) {
   const half = n / 2
   const data = new Float32Array((n + 1) * (n + 1) * 3)
   let p = 0
   for (let iz = 0; iz <= n; iz++) {
     for (let ix = 0; ix <= n; ix++) {
-      data[p++] = (ix - half) * CELL
-      data[p++] = (iz - half) * CELL
+      data[p++] = (ix - half) * cell
+      data[p++] = (iz - half) * cell
       data[p++] = 0
     }
   }
@@ -411,11 +417,11 @@ function buildVertices(n) {
 // The ribbon is uniform in normalized x across its band and reuses the
 // grid's warped axis along z, so the shoreline stays fine near the camera
 // and coarsens toward the horizon
-function buildRibbonVertices(nx, nz) {
+function buildRibbonVertices(nx, nz, cell, linearCells) {
   const half = nz / 2
   const cellAt = i => {
     const a = Math.min(Math.abs(i - half), half - 1)
-    return warpAxis(a + 1) - warpAxis(a)
+    return warpAxis(a + 1, cell, linearCells) - warpAxis(a, cell, linearCells)
   }
   const dxMaterial = RIBBON_SPAN / nx
   const data = new Float32Array((nx + 1) * (nz + 1) * 3)
@@ -423,7 +429,7 @@ function buildRibbonVertices(nx, nz) {
   for (let iz = 0; iz <= nz; iz++) {
     for (let ix = 0; ix <= nx; ix++) {
       data[p++] = ix / nx
-      data[p++] = warpAxis(iz - half)
+      data[p++] = warpAxis(iz - half, cell, linearCells)
       data[p++] = Math.max(dxMaterial, cellAt(iz))
     }
   }

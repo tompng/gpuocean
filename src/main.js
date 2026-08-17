@@ -49,16 +49,20 @@ async function main() {
   const coast = buildCoast(device)
   const chain = new ChainSim(device, coast)
   const filmFoam = new FoamSim(device, waveCommonCode + filmFoamCode, [128, 256])
-  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, foamPlates, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, format)
-  foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
-  filmFoam.bind(ocean.uniform, null, chain.view, null)
+  const oceanCodeFull = atmosphereCode + waveCommonCode + oceanCode
+  const buildOcean = q => new Ocean(device, oceanCodeFull, waveField.texture, capField.texture,
+    foam.views, filmFoam.views, foamPattern, foamPlates, chain.view, chain.coastView, format,
+    { gridN: QUALITY[q].gridN, ribbonCells: QUALITY[q].ribbonCells,
+      cell: QUALITY[q].cell, linearCells: QUALITY[q].linearCells })
+  let ocean = buildOcean('high')
+  foam.bind(ocean.uniform, waveField.texture, null)
+  filmFoam.bind(ocean.uniform, null, chain.view)
   ocean.chain = chain
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
   const reportFPS = setupFPS()
   camera.floor = (x, z) => terrainHeightAt(x, z, params.depth)
-  window.camera = camera // TEMP DEBUG
   setupNoiseDebug([
     ...noise.variants.map(v => ({ name: v.name, size: noise.size, channels: v.channels })),
     { name: 'capillary', size: capNoise.size, channels: capNoise.channels },
@@ -72,6 +76,7 @@ async function main() {
   let width = 0
   let height = 0
   let lastTime = performance.now()
+  let builtQuality = 'high'
 
   function frame(now) {
     const dt = Math.min((now - lastTime) / 1000, 0.1)
@@ -116,6 +121,17 @@ async function main() {
       ocean.setRefractionTarget(refrColor.createView())
     }
 
+    // Quality bakes the grid density into vertex and index buffers, so a
+    // change means rebuilding the Ocean and rebinding what points at it
+    if (params.quality !== builtQuality) {
+      builtQuality = params.quality
+      ocean = buildOcean(builtQuality)
+      ocean.chain = chain
+      foam.bind(ocean.uniform, waveField.texture, null)
+      filmFoam.bind(ocean.uniform, null, chain.view)
+      if (refrColor) ocean.setRefractionTarget(refrColor.createView())
+    }
+
     const waveDt = params.pause ? 0 : dt
     const lambda = params.wavelength
     waveField.update(waveDt, Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / (lambda * noise.wavesPerTile), params.dispersion)
@@ -137,9 +153,9 @@ async function main() {
     const near = Math.min(Math.max(0.35 * Math.abs(camDepth), 0.02), 0.5)
     const viewProj = camera.viewProj(w / h, near)
     const lensR = 0.02 + params.waterlineThickness * 0.5
-    const lodScale = QUALITY[params.quality].lodScale
+    const { lodScale, maxLayers } = QUALITY[params.quality]
     // Exactly once per frame: this advances the wave phases
-    ocean.update(waveDt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale)
+    ocean.update(waveDt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale, maxLayers)
 
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)

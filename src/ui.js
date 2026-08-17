@@ -2,13 +2,20 @@
 // shader all name parameters the same way. Groups tagged (s) act only on the
 // above-water view, (uw) only on the submerged view, and (b) on both.
 
-// Quality rebuilds GPU resources, so it is not a plain uniform: main.js
-// watches params.quality and rebuilds when it changes.
+// Quality scales the near-field CELL SIZE, not the vertex count directly.
+// gridN alone would be the wrong lever: the warp grows cells exponentially
+// past linearCells, so the grid's extent is hyper-sensitive to it — halving
+// gridN shrinks the ocean from 177 km to a 51 m puddle rather than coarsening
+// it. Each row below pairs a cell size with the gridN and linearCells that
+// hold the extent near 175 km, so only the detail changes.
+// These are baked into vertex/index buffers, so a change rebuilds the Ocean;
+// maxLayers and lodScale are per-frame uniforms. The CPU noise textures are
+// deliberately not rescaled — regenerating them costs a visible hitch.
 export const QUALITY = {
-  low: { gridN: 256, ribbonCells: 70, maxLayers: 3, noiseSize: 256, foamSize: 256, capLayers: 0, lodScale: 0.45 },
-  medium: { gridN: 384, ribbonCells: 105, maxLayers: 5, noiseSize: 512, foamSize: 512, capLayers: 6, lodScale: 0.7 },
-  high: { gridN: 512, ribbonCells: 140, maxLayers: 8, noiseSize: 512, foamSize: 512, capLayers: 6, lodScale: 1 },
-  ultra: { gridN: 768, ribbonCells: 190, maxLayers: 8, noiseSize: 1024, foamSize: 1024, capLayers: 6, lodScale: 1.5 },
+  low: { cell: 0.8, linearCells: 80, gridN: 340, ribbonCells: 70, maxLayers: 3, lodScale: 0.4 },
+  medium: { cell: 0.55, linearCells: 116, gridN: 418, ribbonCells: 105, maxLayers: 5, lodScale: 0.7 },
+  high: { cell: 0.4, linearCells: 160, gridN: 512, ribbonCells: 140, maxLayers: 8, lodScale: 1 },
+  ultra: { cell: 0.28, linearCells: 229, gridN: 656, ribbonCells: 190, maxLayers: 8, lodScale: 1.6 },
 }
 
 const SPEC = [

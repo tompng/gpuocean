@@ -45,14 +45,9 @@ struct Uniforms {
   foamDecaySwallow: f32,
   simDt: f32,
   waveK: f32,
-<<<<<<< HEAD
-  padC: f32,
-  foamScale: f32,
-=======
   shoreCurve: f32,
   // retired: the foam plates carry their own scale via noiseScale
   foamScaleUnused: f32,
->>>>>>> dea1a73 (feat(foam): drive foam from photographic plates)
   // mainland film window: center z (follows the camera in whole-column
   // steps) and this frame's shift in film-foam buffer rows
   simZBase: f32,
@@ -95,6 +90,11 @@ struct Uniforms {
   skyTurbidity: f32,
   skyRayleigh: f32,
   skyIntensity: f32,
+  // must match the lattice the vertex buffer was built with
+  warpCell: f32,
+  warpLinear: f32,
+  qPad0: f32,
+  qPad1: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

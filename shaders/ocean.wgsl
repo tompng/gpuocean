@@ -83,12 +83,12 @@ fn causticWeb(xz: vec2f) -> f32 {
 // Their densities are blended and the result eroded once. Eroding each plate
 // and cross-fading the three masks instead would give half-grey ghost foam
 // everywhere two overlap, because the masks are near-binary.
-fn foamPlate(xz: vec2f, flow: vec2f, cover: f32) -> f32 {
+fn foamPlate(xz: vec2f, flow: vec2f, cover: f32, lod: f32) -> f32 {
   let s = 1.0 / (5.0 * u.noiseScale);
   let drift = 0.25 * u.noiseSpeed * u.time;
   // Sparse never drifts: it is the stranded residue at the high-water mark and
   // has to stay locked to the water it was deposited on
-  let sparse = textureSample(foamPlates, samp, xz * s, 0).r;
+  let sparse = textureSampleLevel(foamPlates, samp, xz * s, 0, lod).r;
   // Mid stretches ALONG the flow only. Stretching along by k while also
   // squeezing across by k is area-preserving but distorts every feature by k^2
   // — at k = 2.5 a round bubble becomes a 6:1 smear, and since this plate
@@ -97,10 +97,10 @@ fn foamPlate(xz: vec2f, flow: vec2f, cover: f32) -> f32 {
   let k = 1.0 + 2.0 * u.streaks;
   let along = dot(xz, flow) / k + drift;
   let across = dot(xz, vec2f(-flow.y, flow.x));
-  let mid = textureSample(foamPlates, samp, vec2f(along, across) * s, 1).r;
+  let mid = textureSampleLevel(foamPlates, samp, vec2f(along, across) * s, 1, lod).r;
   // The raft on a fresh crest is the part that visibly churns, so it drifts
   // faster; 2.2 keeps it inherently finer than the lace
-  let dense = textureSample(foamPlates, samp, (xz + flow * (drift * 1.7)) * (s * 2.2 / u.crestScale), 2).r;
+  let dense = textureSampleLevel(foamPlates, samp, (xz + flow * (drift * 1.7)) * (s * 2.2 / u.crestScale), 2, lod).r;
   return mix(mix(sparse, mid, smoothstep(u.laceLow, u.laceHigh, cover)),
              dense, smoothstep(u.crestStart, u.crestFull, cover));
 }
@@ -153,7 +153,7 @@ fn softClamp(height: f32, ty: f32) -> f32 {
 }
 
 // The grid/land lattice is static and uniform; the vertex shader maps it
-// around the camera with a radial warp — identity out to WARP_LINEAR, then
+// around the camera with a radial warp — identity out to warpLinear, then
 // exponentially growing cells. The center snaps to the lattice pitch so
 // near vertices sit on a fixed world lattice (no swimming); far vertices
 // slide with the camera, which is invisible because every field they
@@ -161,20 +161,18 @@ fn softClamp(height: f32, ty: f32) -> f32 {
 // Hard cap on the screen-space refraction offset, in uv units
 const REFR_CLAMP: f32 = 0.08;
 
-const WARP_CELL: f32 = 0.4;
-const WARP_LINEAR: f32 = 64.0;
-const WARP_GROWTH: f32 = 1.08;
+const WARP_GROWTH: f32 = 1.12;
 
 fn warpVertex(p: vec2f) -> vec3f {
-  let snap = floor(u.cameraPos.xz / WARP_CELL + 0.5) * WARP_CELL;
+  let snap = floor(u.cameraPos.xz / u.warpCell + 0.5) * u.warpCell;
   let r = length(p);
-  if (r <= WARP_LINEAR) {
-    return vec3f(snap + p, WARP_CELL);
+  if (r <= u.warpLinear) {
+    return vec3f(snap + p, u.warpCell);
   }
-  let k = min((r - WARP_LINEAR) / WARP_CELL, 98.0);
+  let k = min((r - u.warpLinear) / u.warpCell, 110.0);
   let g = pow(WARP_GROWTH, k);
-  let rw = WARP_LINEAR + WARP_CELL * (g - 1.0) / (WARP_GROWTH - 1.0);
-  return vec3f(snap + p * (rw / r), WARP_CELL * g);
+  let rw = u.warpLinear + u.warpCell * (g - 1.0) / (WARP_GROWTH - 1.0);
+  return vec3f(snap + p * (rw / r), u.warpCell * g);
 }
 
 // the grid's cell size at a given world distance from the camera: the
@@ -386,7 +384,7 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
   let front = smoothstep(0.0, 0.15, -dPx.y);
   let squeeze = smoothstep(0.0, 0.3, 2.0 - dPx.x - dPz.z);
   let conc = front + squeeze;
-  let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0);
+  let fade = clamp(1.0 - dist / (150.0 * u.lodScale), 0.0, 1.0);
   let isoScale = mix(1.0, conc, u.rippleBias * 0.4) * fade;
   let anisoScale = mix(1.0, conc, u.rippleBias) * fade;
   for (var i = 0; i < 6; i++) {
@@ -515,7 +513,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let web = causticWeb(bottomXZ);
   // Caustics need some water column to focus in; a centimeters-thin film
   // (or the residual softmax offset on dry sand) must not carry the web
-  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * smoothstep(0.04, 0.25, column);
+  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / (120.0 * u.lodScale), 0.0, 1.0) * smoothstep(0.04, 0.25, column);
   // Analytic flat bottom, kept as the fallback wherever the screen-space tap
   // has nothing valid to say
   let sandA = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
@@ -594,7 +592,10 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
   // The dominant wave direction orients the streak shear
   let waveFlow = u.layers[0].dirScaleAmp.xy;
-  let patWave = foamPlate(in.gridXZ, waveFlow, accR);
+  // Level from the pixel's world footprint against the plate's tile size, so
+  // the film's compressed material frame cannot pick a level that shimmers
+  let plateLod = max(log2(max(length(fwidth(in.world.xz)) / (5.0 * u.noiseScale), 1e-6) * 1024.0), 0.0);
+  let patWave = foamPlate(in.gridXZ, waveFlow, foamAcc.r, plateLod);
   // Over-compressed foam filaments merge instead of thinning forever: as
   // the film compresses, coarsen in the cross-shore direction only, so the
   // rendered streaks stop shrinking. In the film frame flow is +band.
@@ -602,8 +603,8 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // past about 4:1 the bubbles read as smear rather than as stretched foam.
   let bStretch = mix(2.0, 4.0, 1.0 - smoothstep(0.07, 0.4, in.stretch));
   let filmCover = filmAcc.b + filmAcc.r * 0.8;
-  let patFilm = foamPlate(vec2f(in.st.x / bStretch, colT(in.st.y)), vec2f(1.0, 0.0), filmCover);
-  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR));
+  let patFilm = foamPlate(vec2f(in.st.x / bStretch, colT(in.st.y)), vec2f(1.0, 0.0), filmCover, plateLod);
+  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * foamAcc.r));
   let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * filmCover));
   // The unbroken lip at the swash front: a thin water column carries a bright
   // rim independently of accumulation, gated so a dead-calm film grows none
@@ -665,7 +666,7 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   // the waterline the column is zero and it stays plain lit sand.
   let uw = underwaterAt(-v, u.camDepth, u.lensR);
   let column = max(-in.world.y, 0.0);
-  let focus = u.uwCaustics * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
+  let focus = u.uwCaustics * exp(-column * 0.12) * clamp(1.0 - dist / (120.0 * u.lodScale), 0.0, 1.0);
   let floorLit = 0.85 + focus * (1.6 * causticWeb(in.gridXZ) - 0.18);
   let floor = vec3f(0.86, 0.78, 0.58) * floorLit
             * waterAmbient(column, SKY, waterSigma(u.uwTurbidity, u.chlorophyll)) * (0.55 + 0.45 * max(n.y, 0.0));
@@ -689,7 +690,7 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
 fn fs_land_refract(in: VSOut) -> @location(0) vec4f {
   let column = max(-in.world.y, 0.0);
   let dist = distance(u.cameraPos, in.world);
-  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
+  let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / (120.0 * u.lodScale), 0.0, 1.0);
   let lit = 0.85 + focus * (1.6 * causticWeb(in.gridXZ) - 0.18);
   // Soft over ~15 cm of terrain height so the mask ramps instead of popping
   let submerged = smoothstep(0.02, 0.15, column);
