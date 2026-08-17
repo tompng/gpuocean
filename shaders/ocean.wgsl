@@ -425,7 +425,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let depthF = max(-ty, 0.05);
   let genSurfF = smoothstep(0.55, 0.9, in.world.y / depthF) * smoothstep(0.0, 0.5, depthF) * waterGateF;
   let farR = max(smoothstep(zQ, zQ - FAR_SOFT, zNow) * waterGateF, genSurfF);
-  let accR = mix(farR, foamRaw.r, edgeFade);
+  // From high above, fragments inside the window are still far from the
+  // camera: the buffer's wake shapes resolve to speckle while its
+  // character differs from the stand-in outside, so the boundary shows.
+  // Blend by camera distance as well as by the window edge.
+  let bufBlend = edgeFade * (1.0 - smoothstep(u.foamRegion, 2.0 * u.foamRegion, dist));
+  let accR = mix(farR, foamRaw.r, bufBlend);
   // Bubble clouds scatter multiply and emerge nearly isotropic (white water);
   // a mild forward lobe remains for thin backlit crests. The film is a sheet
   // too thin to hold a submerged bubble cloud, so the glow fades out there
