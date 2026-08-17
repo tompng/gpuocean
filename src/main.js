@@ -29,6 +29,23 @@ function sunDirection(timeOfDay, latitude, azimuth) {
   return [ground * Math.sin(bearing), Math.sin(elevation), ground * Math.cos(bearing)]
 }
 
+// Everything that has to be rebuilt when the canvas resizes. The refraction
+// target is single-sampled on purpose: it exists to be sampled at a wobbling
+// offset and then multiplied by extinction, so 4x coverage would be discarded.
+function createTargets(device, format, w, h) {
+  const attachment = GPUTextureUsage.RENDER_ATTACHMENT
+  const make = (fmt, usage, sampleCount) =>
+    device.createTexture({ size: [w, h], format: fmt, sampleCount, usage })
+  const t = {
+    depth: make('depth24plus', attachment, 4),
+    msaa: make(format, attachment, 4),
+    refrColor: make('rgba16float', attachment | GPUTextureUsage.TEXTURE_BINDING, 1),
+    refrDepth: make('depth24plus', attachment, 1),
+  }
+  t.destroy = () => { for (const k of ['depth', 'msaa', 'refrColor', 'refrDepth']) t[k].destroy() }
+  return t
+}
+
 // Full-moon geometry: the moon rides the sun's path half a day out of phase and
 // on the opposite bearing, so it rises as the sun sets and is highest at
 // midnight. Enough to key a night scene without a full lunar ephemeris.
@@ -78,10 +95,7 @@ async function main() {
     { name: 'foamPattern', size: foamPattern.size, channels: foamPattern.channels },
   ])
 
-  let depth = null
-  let msaa = null
-  let refrColor = null
-  let refrDepth = null
+  let targets = null
   let width = 0
   let height = 0
   let lastTime = performance.now()
@@ -99,35 +113,9 @@ async function main() {
       height = h
       canvas.width = w
       canvas.height = h
-      depth?.destroy()
-      msaa?.destroy()
-      refrColor?.destroy()
-      refrDepth?.destroy()
-      depth = device.createTexture({
-        size: [w, h],
-        format: 'depth24plus',
-        sampleCount: 4,
-        usage: GPUTextureUsage.RENDER_ATTACHMENT,
-      })
-      msaa = device.createTexture({
-        size: [w, h],
-        format,
-        sampleCount: 4,
-        usage: GPUTextureUsage.RENDER_ATTACHMENT,
-      })
-      // Single-sampled: this image exists to be sampled at a wobbling offset
-      // and then multiplied by extinction, so 4x coverage would be thrown away
-      refrColor = device.createTexture({
-        size: [w, h],
-        format: 'rgba16float',
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-      })
-      refrDepth = device.createTexture({
-        size: [w, h],
-        format: 'depth24plus',
-        usage: GPUTextureUsage.RENDER_ATTACHMENT,
-      })
-      ocean.setRefractionTarget(refrColor.createView())
+      targets?.destroy()
+      targets = createTargets(device, format, w, h)
+      ocean.setRefractionTarget(targets.refrColor.createView())
     }
 
     // Quality bakes the grid density into vertex and index buffers, so a
@@ -138,7 +126,7 @@ async function main() {
       ocean.chain = chain
       foam.bind(ocean.uniform, waveField.texture, null)
       filmFoam.bind(ocean.uniform, null, chain.view)
-      if (refrColor) ocean.setRefractionTarget(refrColor.createView())
+      if (targets) ocean.setRefractionTarget(targets.refrColor.createView())
     }
 
     const waveDt = params.pause ? 0 : dt
@@ -182,13 +170,13 @@ async function main() {
     // all discard, and copying that habit yields a garbage texture silently.
     const refrPass = encoder.beginRenderPass({
       colorAttachments: [{
-        view: refrColor.createView(),
+        view: targets.refrColor.createView(),
         loadOp: 'clear',
         storeOp: 'store',
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
       }],
       depthStencilAttachment: {
-        view: refrDepth.createView(),
+        view: targets.refrDepth.createView(),
         depthLoadOp: 'clear',
         depthStoreOp: 'discard',
         depthClearValue: 1,
@@ -200,14 +188,14 @@ async function main() {
 
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
-        view: msaa.createView(),
+        view: targets.msaa.createView(),
         resolveTarget: context.getCurrentTexture().createView(),
         loadOp: 'clear',
         storeOp: 'discard',
         clearValue: { r: 0.84, g: 0.87, b: 0.9, a: 1 },
       }],
       depthStencilAttachment: {
-        view: depth.createView(),
+        view: targets.depth.createView(),
         depthLoadOp: 'clear',
         depthStoreOp: 'discard',
         depthClearValue: 1,

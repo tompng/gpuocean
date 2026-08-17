@@ -35,16 +35,84 @@ const RIBBON_SPAN = 28
 const RIBBON_CELLS = 140
 // Rise time of foam generation, roughly the crest's texel-crossing time [s]
 const FOAM_RISE = 0.08
-// Uniforms struct size in floats; must stay a multiple of 4 (16-byte struct
-// alignment) and match the tail of Uniforms in wave_common.wgsl
-const UNIFORM_FLOATS = 204
+// Field offsets into the uniform buffer, mirroring Uniforms in
+// wave_common.wgsl. Writing by name rather than by raw index is not cosmetic:
+// every offset bug this file has had — a resized struct that outgrew its
+// buffer, a field written to a stale slot — was invisible until it corrupted a
+// value at runtime. buildLayout derives the offsets from the same declaration
+// order the shader uses and applies WGSL's alignment rules, and asserts the
+// total, so a struct edited on one side and not the other fails at startup.
+const UNIFORM_LAYOUT = buildLayout([
+  ['viewProj', 16], ['cameraPos', 3], ['time', 1], ['sunDir', 3], ['padA', 1],
+  ['numLayers', 1], ['choppiness', 1], ['dGrad', 1], ['hGrad', 1],
+  ['foamCX', 1], ['foamCZ', 1], ['foamDX', 1], ['foamDZ', 1],
+  ['layers', 64], ['capLayers', 48],
+  ['capHGrad', 1], ['rippleBias', 1], ['sssStrength', 1], ['ampInv', 1],
+  ['seaDepth', 1], ['causticStrength', 1], ['causticScale', 1],
+  ['leanX', 1], ['leanY', 1], ['foamThreshold', 1], ['foamRegion', 1],
+  ['foamDecay', 1], ['foamDecayG', 1], ['foamRise', 1], ['shoreX', 1],
+  ['slope', 1], ['foamDecaySwallow', 1], ['simDt', 1], ['waveK', 1],
+  ['shoreCurve', 1], ['foamScaleUnused', 1], ['simZBase', 1], ['simZShift', 1],
+  ['camDepth', 1], ['lensR', 1],
+  ['uwTurbidity', 1], ['uwFog', 1], ['uwCaustics', 1],
+  ['distortionStrength', 1], ['distortionScale', 1], ['particleDensity', 1],
+  ['rippleStrength', 1], ['sTurbidity', 1], ['sChlorophyll', 1],
+  ['chlorophyll', 1], ['lodScale', 1],
+  ['noiseScale', 1], ['noiseSpeed', 1], ['laceLow', 1], ['laceHigh', 1],
+  ['crestStart', 1], ['crestFull', 1], ['opacity', 1], ['crestScale', 1],
+  ['contactWidth', 1], ['streaks', 1], ['shoreWidth', 1], ['lapOvershoot', 1],
+  ['surgeRate', 1], ['skyTurbidity', 1], ['skyRayleigh', 1], ['skyIntensity', 1],
+  ['warpCell', 1], ['warpLinear', 1], ['plateSel', 1], ['qPad1', 1],
+  ['moonDir', 3],
+])
+
+// The shader is the source of truth, so the field list above is checked against
+// it once at startup. A field added to one side and not the other then fails
+// loudly here instead of shifting every subsequent offset silently.
+function checkUniformLayout(code) {
+  const struct = code.match(/struct Uniforms \{([\s\S]*?)\n\}/)
+  if (!struct) return
+  const declared = [...struct[1].matchAll(/^\s*(\w+)\s*:/gm)].map(m => m[1])
+  const ours = Object.keys(UNIFORM_LAYOUT).filter(k => k !== 'TOTAL')
+  const missing = declared.filter(n => !ours.includes(n))
+  const extra = ours.filter(n => !declared.includes(n))
+  if (missing.length || extra.length) {
+    throw new Error(`Uniforms layout drifted from wave_common.wgsl — ` +
+      `missing in JS: [${missing}] · not in shader: [${extra}]`)
+  }
+  const order = declared.filter(n => ours.includes(n))
+  for (let i = 1; i < order.length; i++) {
+    if (UNIFORM_LAYOUT[order[i]] < UNIFORM_LAYOUT[order[i - 1]]) {
+      throw new Error(`Uniforms field order differs at '${order[i]}'`)
+    }
+  }
+}
+
+// WGSL rounds a vec3f/vec4f to a 16-byte boundary and the struct to its largest
+// member alignment, so the same rules are applied here rather than assumed.
+function buildLayout(fields) {
+  const at = {}
+  let i = 0
+  for (const [name, size] of fields) {
+    if (size >= 3) i = Math.ceil(i / 4) * 4
+    at[name] = i
+    i += size
+  }
+  at.TOTAL = Math.ceil(i / 4) * 4
+  return at
+}
+
+const UNIFORM_FLOATS = UNIFORM_LAYOUT.TOTAL
+// Short alias: this file writes almost every field, every frame
+const F = UNIFORM_LAYOUT
 // Linear radiance, so the surface can attenuate before its own tonemap
 const REFRACT_FORMAT = 'rgba16float'
 // Which foam plate the shader samples; blend runs the coverage ramp
 const PLATE_SEL = { blend: -1, sparse: 0, mid: 1, dense: 2, procedural: 3 }
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, format, opts = {}) {
+    checkUniformLayout(code)
     this.device = device
     this.gridN = opts.gridN ?? GRID_N
     const ribbonCells = opts.ribbonCells ?? RIBBON_CELLS
@@ -226,14 +294,14 @@ export class Ocean {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
-    u[16] = eye[0]; u[17] = eye[1]; u[18] = eye[2]; u[19] = this.time
-    u[20] = sunDir[0]; u[21] = sunDir[1]; u[22] = sunDir[2]
+    u[F.cameraPos] = eye[0]; u[F.cameraPos + 1] = eye[1]; u[F.cameraPos + 2] = eye[2]; u[F.time] = this.time
+    u[F.sunDir] = sunDir[0]; u[F.sunDir + 1] = sunDir[1]; u[F.sunDir + 2] = sunDir[2]
     // the quality cap bounds the per-vertex and per-fragment layer loops
     const count = Math.min(Math.round(params.layers), maxLayers)
-    u[24] = count
-    u[25] = params.choppiness
-    u[26] = noise.size * noise.dispGradPerTexel
-    u[27] = noise.size
+    u[F.numLayers] = count
+    u[F.choppiness] = params.choppiness
+    u[F.dGrad] = noise.size * noise.dispGradPerTexel
+    u[F.hGrad] = noise.size
 
     const spread = params.spread * Math.PI / 180
     let sq = 0
@@ -249,7 +317,7 @@ export class Ocean {
       const angle = params.waveDir * Math.PI / 180 + DIR_FRACS[i] * spread
       meanX += SCALE_RATIO ** (2 * i) * Math.cos(angle)
       meanZ += SCALE_RATIO ** (2 * i) * Math.sin(angle)
-      const o = 32 + i * 8
+      const o = F.layers + i * 8
       u[o] = Math.cos(angle)
       u[o + 1] = Math.sin(angle)
       u[o + 2] = 1 / tile
@@ -276,7 +344,7 @@ export class Ocean {
       // anisotropic parasitic ripples follow the rotated gravity waves; the
       // isotropic wind ripples keep their own fixed directions
       const angle = aniso ? params.waveDir * Math.PI / 180 + CAP_ANISO_FRACS[j] * spread : CAP_ANGLES[j]
-      const o = 96 + i * 8
+      const o = F.capLayers + i * 8
       u[o] = Math.cos(angle)
       u[o + 1] = Math.sin(angle)
       u[o + 2] = 1 / tile
@@ -286,25 +354,25 @@ export class Ocean {
       u[o + 6] = 0
       u[o + 7] = 0
     }
-    u[144] = capNoise.size
-    u[145] = params.rippleBias
-    u[146] = params.sss
-    u[147] = 1 / Math.max(params.amplitude, 0.01)
-    u[148] = params.depth
-    u[149] = params.sCaustics
+    u[F.capHGrad] = capNoise.size
+    u[F.rippleBias] = params.rippleBias
+    u[F.sssStrength] = params.sss
+    u[F.ampInv] = 1 / Math.max(params.amplitude, 0.01)
+    u[F.seaDepth] = params.depth
+    u[F.causticStrength] = params.sCaustics
     // caustic web cells scale with the ripple wavelength; 0.6 is the tuned default
-    u[150] = params.rippleScale / 0.6
+    u[F.causticScale] = params.rippleScale / 0.6
     const meanLen = Math.hypot(meanX, meanZ) || 1
-    u[151] = params.lean * meanX / meanLen
-    u[152] = params.lean * meanZ / meanLen
-    u[153] = params.foam
-    u[154] = FOAM_REGION
+    u[F.leanX] = params.lean * meanX / meanLen
+    u[F.leanY] = params.lean * meanZ / meanLen
+    u[F.foamThreshold] = params.foam
+    u[F.foamRegion] = FOAM_REGION
     const life = params.foamLife * Math.max(params.persistence, 0.01)
-    u[155] = Math.exp(-dt / life)
-    u[156] = Math.exp(-dt / (life * 0.25))
-    u[157] = Math.exp(-dt / FOAM_RISE)
-    u[158] = params.foamLife
-    u[159] = SLOPE
+    u[F.foamDecay] = Math.exp(-dt / life)
+    u[F.foamDecayG] = Math.exp(-dt / (life * 0.25))
+    u[F.foamRise] = Math.exp(-dt / FOAM_RISE)
+    u[F.shoreX] = SHORE_X
+    u[F.slope] = SLOPE
     // world foam window follows the camera, snapped to buffer texels so the
     // carried-over content resamples exactly; frozen while paused so the
     // accumulated shift never outruns the skipped foam passes
@@ -319,55 +387,54 @@ export class Ocean {
       fdz = (cz - this.foamC[1]) / (2 * FOAM_REGION)
       this.foamC = [cx, cz]
     }
-    u[28] = this.foamC[0]
-    u[29] = this.foamC[1]
-    u[30] = fdx
-    u[31] = fdz
-    u[23] = this.chain.islandArcStep
-    u[165] = this.chain.zBase
-    u[166] = this.chain.lastShift
-    u[167] = this.chain.tCamSnap
-    u[168] = camDepth
+    u[F.foamCX] = this.foamC[0]
+    u[F.foamCZ] = this.foamC[1]
+    u[F.foamDX] = fdx
+    u[F.foamDZ] = fdz
+    u[F.simZBase] = this.chain.zBase
+    u[F.simZShift] = this.chain.lastShift
+    u[F.camDepth] = camDepth
     // waterlineThickness is authored 0..1; as a port radius that is a few cm
     // to half a meter, which is the range over which the split reads as a lens
-    u[169] = 0.02 + params.waterlineThickness * 0.5
-    u[170] = params.uwTurbidity
-    u[171] = params.uwFog
-    u[172] = params.uwCaustics
-    u[173] = params.distortionStrength
-    u[174] = params.distortionScale
-    u[175] = params.particleDensity
-    u[176] = params.rippleStrength
-    u[177] = params.sTurbidity
-    u[178] = params.sChlorophyll
-    u[179] = params.chlorophyll
-    u[180] = lodScale
-    u[181] = params.noiseScale
-    u[182] = params.noiseSpeed
+    u[F.lensR] = 0.02 + params.waterlineThickness * 0.5
+    u[F.uwTurbidity] = params.uwTurbidity
+    u[F.uwFog] = params.uwFog
+    u[F.uwCaustics] = params.uwCaustics
+    u[F.distortionStrength] = params.distortionStrength
+    u[F.distortionScale] = params.distortionScale
+    u[F.particleDensity] = params.particleDensity
+    u[F.rippleStrength] = params.rippleStrength
+    u[F.sTurbidity] = params.sTurbidity
+    u[F.sChlorophyll] = params.sChlorophyll
+    u[F.chlorophyll] = params.chlorophyll
+    u[F.lodScale] = lodScale
+    u[F.noiseScale] = params.noiseScale
+    u[F.noiseSpeed] = params.noiseSpeed
     // smoothstep(a, a, x) is a divide by zero in WGSL, and both ramps can be
     // collapsed from the sliders, so separate the endpoints here
-    u[183] = params.laceLow
-    u[184] = Math.max(params.laceHigh, params.laceLow + 1e-3)
-    u[185] = params.crestStart
-    u[186] = Math.max(params.crestFull, params.crestStart + 1e-3)
-    u[187] = params.opacity
-    u[188] = params.crestScale
-    u[189] = Math.max(params.contactWidth, 1e-3)
-    u[190] = params.streaks
-    u[191] = params.shoreWidth
-    u[192] = params.lapOvershoot
-    u[193] = params.surgeRate
-    u[194] = params.skyTurbidity
-    u[195] = params.rayleigh
-    u[196] = params.intensity
-    u[197] = this.cell
-    u[198] = this.linearCells * this.cell
-    u[199] = PLATE_SEL[params.plate] ?? -1
-    u[201] = moonDir[0]; u[202] = moonDir[1]; u[203] = moonDir[2]
-    u[160] = Math.exp(-dt / 0.5)
-    u[161] = Math.min(dt, 0.033)
-    u[162] = 2 * Math.PI / params.wavelength
-    u[164] = 1
+    u[F.laceLow] = params.laceLow
+    u[F.laceHigh] = Math.max(params.laceHigh, params.laceLow + 1e-3)
+    u[F.crestStart] = params.crestStart
+    u[F.crestFull] = Math.max(params.crestFull, params.crestStart + 1e-3)
+    u[F.opacity] = params.opacity
+    u[F.crestScale] = params.crestScale
+    u[F.contactWidth] = Math.max(params.contactWidth, 1e-3)
+    u[F.streaks] = params.streaks
+    u[F.shoreWidth] = params.shoreWidth
+    u[F.lapOvershoot] = params.lapOvershoot
+    u[F.surgeRate] = params.surgeRate
+    u[F.skyTurbidity] = params.skyTurbidity
+    u[F.skyRayleigh] = params.rayleigh
+    u[F.skyIntensity] = params.intensity
+    u[F.warpCell] = this.cell
+    u[F.warpLinear] = this.linearCells * this.cell
+    u[F.plateSel] = PLATE_SEL[params.plate] ?? -1
+    u[F.moonDir] = moonDir[0]; u[F.moonDir + 1] = moonDir[1]; u[F.moonDir + 2] = moonDir[2]
+    u[F.foamDecaySwallow] = Math.exp(-dt / 0.5)
+    u[F.simDt] = Math.min(dt, 0.033)
+    u[F.waveK] = 2 * Math.PI / params.wavelength
+    u[F.shoreCurve] = SHORE_CURVE
+    u[F.foamScaleUnused] = 1
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
   }
