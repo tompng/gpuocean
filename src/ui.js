@@ -247,7 +247,7 @@ export function setupFPS() {
   const el = document.getElementById('fps')
   let avg = 0
   let since = 0
-  return dt => {
+  return (dt, gpu) => {
     if (dt <= 0) return
     avg = avg === 0 ? 1 / dt : avg + (1 / dt - avg) * 0.05
     // The average tracks every frame, but the text is only rewritten a few
@@ -255,6 +255,7 @@ export function setupFPS() {
     since += dt
     if (since < 0.25) return
     since = 0
-    el.textContent = `${avg.toFixed(0)} fps`
+    // fps is vsync-capped; the GPU figure is what actually reflects cost
+    el.textContent = gpu ? `${avg.toFixed(0)} fps \u00b7 ${gpu}` : `${avg.toFixed(0)} fps`
   }
 }

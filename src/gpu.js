@@ -2,7 +2,12 @@ export async function initWebGPU(canvas) {
   if (!navigator.gpu) throw new Error('WebGPU is not available in this browser')
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
   if (!adapter) throw new Error('No WebGPU adapter found')
-  const device = await adapter.requestDevice()
+  // Wall-clock frame timing is vsync-capped and cannot see below the refresh
+  // interval, so ask for GPU timestamps when the adapter has them
+  const timestamps = adapter.features.has('timestamp-query')
+  const device = await adapter.requestDevice({
+    requiredFeatures: timestamps ? ['timestamp-query'] : [],
+  })
   // A validation error otherwise only reaches the console, where a per-frame
   // pass failure scrolls past as an unattributed warning and the canvas just
   // goes black. Surface the first one in the error panel instead.
@@ -15,7 +20,7 @@ export async function initWebGPU(canvas) {
   const context = canvas.getContext('webgpu')
   const format = navigator.gpu.getPreferredCanvasFormat()
   context.configure({ device, format, alphaMode: 'opaque' })
-  return { device, context, format }
+  return { device, context, format, timestamps }
 }
 
 export async function fetchText(url) {

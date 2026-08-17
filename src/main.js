@@ -9,6 +9,7 @@ import { Sky } from './sky.js'
 import { OrbitCamera } from './camera.js'
 import { invert } from './mat4.js'
 import { setupUI, setupFPS, QUALITY } from './ui.js'
+import { GPUTimer } from './gputimer.js'
 import { setupNoiseDebug } from './debug.js'
 
 const canvas = document.getElementById('canvas')
@@ -36,7 +37,7 @@ function moonDirection(timeOfDay, latitude, azimuth) {
 }
 
 async function main() {
-  const { device, context, format } = await initWebGPU(canvas)
+  const { device, context, format, timestamps } = await initWebGPU(canvas)
   const [waveFieldCode, waveCommonCode, oceanCode, atmosphereCode, skyCode, foamCode, filmFoamCode] = await Promise.all(
     ['wave_field', 'wave_common', 'ocean', 'atmosphere', 'sky', 'foam', 'filmfoam'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
   )
@@ -69,6 +70,7 @@ async function main() {
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
   const reportFPS = setupFPS()
+  const timer = new GPUTimer(device, timestamps, ['refract', 'scene'])
   camera.floor = (x, z) => terrainHeightAt(x, z, params.depth)
   setupNoiseDebug([
     ...noise.variants.map(v => ({ name: v.name, size: noise.size, channels: v.channels })),
@@ -88,7 +90,7 @@ async function main() {
   function frame(now) {
     const dt = Math.min((now - lastTime) / 1000, 0.1)
     lastTime = now
-    reportFPS(dt)
+    reportFPS(dt, timer.label())
 
     const w = Math.max(1, Math.floor(canvas.clientWidth * devicePixelRatio))
     const h = Math.max(1, Math.floor(canvas.clientHeight * devicePixelRatio))
@@ -191,6 +193,7 @@ async function main() {
         depthStoreOp: 'discard',
         depthClearValue: 1,
       },
+      timestampWrites: timer.writes(0),
     })
     ocean.drawRefraction(refrPass, foam.index, filmFoam.index)
     refrPass.end()
@@ -209,11 +212,14 @@ async function main() {
         depthStoreOp: 'discard',
         depthClearValue: 1,
       },
+      timestampWrites: timer.writes(1),
     })
     sky.render(pass, invert(viewProj), eye, sunDir, moonDir, camDepth, lensR, params.uwTurbidity, params.chlorophyll, params)
     ocean.draw(pass, params, foam.index, filmFoam.index)
     pass.end()
+    timer.resolveInto(encoder)
     device.queue.submit([encoder.finish()])
+    timer.read()
     requestAnimationFrame(frame)
   }
   requestAnimationFrame(frame)
