@@ -91,9 +91,10 @@ struct Uniforms {
   shoreWidth: f32,
   lapOvershoot: f32,
   surgeRate: f32,
-  fPad0: f32,
-  fPad1: f32,
-  fPad2: f32,
+  // sky model
+  skyTurbidity: f32,
+  skyRayleigh: f32,
+  skyIntensity: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

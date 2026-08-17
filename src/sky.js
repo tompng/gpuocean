@@ -20,7 +20,7 @@ export class Sky {
     this.data = new Float32Array(32)
   }
 
-  render(pass, invViewProj, eye, sunDir, camDepth, lensR, turbidity, chlorophyll) {
+  render(pass, invViewProj, eye, sunDir, camDepth, lensR, turbidity, chlorophyll, sky) {
     this.data.set(invViewProj, 0)
     this.data[16] = eye[0]; this.data[17] = eye[1]; this.data[18] = eye[2]
     this.data[19] = lensR
@@ -28,6 +28,9 @@ export class Sky {
     this.data[23] = camDepth
     this.data[24] = turbidity
     this.data[25] = chlorophyll
+    this.data[26] = sky.skyTurbidity
+    this.data[27] = sky.rayleigh
+    this.data[28] = sky.intensity
     this.device.queue.writeBuffer(this.uniform, 0, this.data)
     pass.setPipeline(this.pipeline)
     pass.setBindGroup(0, this.bindGroup)

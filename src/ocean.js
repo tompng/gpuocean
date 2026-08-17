@@ -298,6 +298,9 @@ export class Ocean {
     u[191] = params.shoreWidth
     u[192] = params.lapOvershoot
     u[193] = params.surgeRate
+    u[194] = params.skyTurbidity
+    u[195] = params.rayleigh
+    u[196] = params.intensity
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength

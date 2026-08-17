@@ -435,10 +435,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let nTerr = normalize(vec3f(-hx / (2.0 * eT), 1.0, -hz / (2.0 * eT)));
   n = normalize(mix(nTerr, n, waterM));
   let v = normalize(u.cameraPos - in.world);
+  let SKY = skyState(u.sunDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
   if (dot(n, v) < 0.0) { n = -n; }
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
   let r = reflect(-v, n);
-  let spec = sunTint(u.sunDir) * (mix(8.0, 4.5, sunWarmth(u.sunDir)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
+  let spec = sunTint(SKY) * (mix(8.0, 4.5, sunWarmth(SKY)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
   let fCenter = vec2f(u.foamCX, u.foamCZ);
   let fuv = (in.gridXZ - fCenter) / (2.0 * u.foamRegion) + 0.5;
   let edgeFade = 1.0 - smoothstep(0.85, 1.0, length(in.gridXZ - fCenter) / u.foamRegion);
@@ -507,16 +508,16 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
   // -v is the ray from the eye toward this fragment
   let uw = underwaterAt(-v, u.camDepth, u.lensR);
-  let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
+  let lightTint = mix(vec3f(1.0), sunTint(SKY), 0.6);
   // Direct sunlight in the water column fades as the sun drops; the floor
   // stands in for diffuse sky light
-  let sunLevel = mix(0.18, 1.0, smoothstep(0.0, 0.5, clamp(u.sunDir.y, 0.0, 1.0)));
+  let sunLev = sunLevel(SKY);
   var water = mix(waterHue(u.sTurbidity, u.chlorophyll * u.sChlorophyll) * 0.16, sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
-  water *= sunLevel;
-  var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;
+  water *= sunLev;
+  var color = mix(water, skyColor(r, SKY), fresnel) + spec;
   // Dry sand above the runup line: matte, no fresnel reflection or caustics
-  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0));
+  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev * (0.55 + 0.45 * max(n.y, 0.0));
   color = mix(sandMatte, color, waterM);
   // Seen from underneath, the whole sky squeezes into Snell's window — the
   // ~97 degree cone about vertical set by the critical angle — and outside it
@@ -529,7 +530,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // term: march the reflection down to the flat basin and tint by the path
   let mRay = reflect(-v, n);
   let mPath = min((in.world.y + u.seaDepth) / max(-mRay.y, 0.05), 400.0);
-  let mirror = mix(waterFogAlong(mRay, u.camDepth, u.sunDir, u.uwTurbidity, u.chlorophyll), sand * lightTint * sunLevel,
+  let mirror = mix(waterFogAlong(mRay, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll), sand * lightTint * sunLev,
                    exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * mPath));
   // Fresnel on the air side; at and past the critical angle it saturates to a
   // full mirror, which is what closes the rim of the window
@@ -537,7 +538,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let fresUp = select(0.02 + 0.98 * pow(1.0 - cosAir, 5.0), 1.0, tir);
   // skyColor already carries the sun disc, so the window shows the sun on its
   // own; the above-water spec lobe belongs to the other side of the interface
-  let underside = mix(skyColor(tRay, u.sunDir), mirror, fresUp);
+  let underside = mix(skyColor(tRay, SKY), mirror, fresUp);
   color = mix(color, underside, uw);
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
@@ -569,14 +570,14 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the masks are thresholded 0/1 fields, so foam is present when either
   // system says so — a blend would half-fade both across the handover
   let foamMask = min(maskWave + maskFilm + rim, 1.0) * u.opacity;
-  let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
+  let foamColor = lightTint * mix(0.45, 1.0, sunLev) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);
-  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
+  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), SKY), fog);
   // Underwater the aerial perspective is the water column itself, and it
   // closes in orders of magnitude faster
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
-  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, u.sunDir, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
+  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }
@@ -602,13 +603,14 @@ fn vs_land(in: VSIn) -> VSOut {
 
 @fragment
 fn fs_land(in: VSOut) -> @location(0) vec4f {
+  let SKY = skyState(u.sunDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
   let e = 0.5;
   let hx = terrainHeight(in.gridXZ + vec2f(e, 0.0)) - terrainHeight(in.gridXZ - vec2f(e, 0.0));
   let hz = terrainHeight(in.gridXZ + vec2f(0.0, e)) - terrainHeight(in.gridXZ - vec2f(0.0, e));
   let n = normalize(vec3f(-hx / (2.0 * e), 1.0, -hz / (2.0 * e)));
-  let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
-  let sunLevel = mix(0.18, 1.0, smoothstep(0.0, 0.5, clamp(u.sunDir.y, 0.0, 1.0)));
-  var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0));
+  let lightTint = mix(vec3f(1.0), sunTint(SKY), 0.6);
+  let sunLev = sunLevel(SKY);
+  var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev * (0.55 + 0.45 * max(n.y, 0.0));
   let dist = distance(u.cameraPos, in.world);
   let v = normalize(u.cameraPos - in.world);
   // Submerged, this same mesh IS the basin floor: daylight reaches it filtered
@@ -619,12 +621,12 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   let focus = u.uwCaustics * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
   let floorLit = 0.85 + focus * (1.6 * causticWeb(in.gridXZ) - 0.18);
   let floor = vec3f(0.86, 0.78, 0.58) * floorLit
-            * waterAmbient(column, u.sunDir, waterSigma(u.uwTurbidity, u.chlorophyll)) * (0.55 + 0.45 * max(n.y, 0.0));
+            * waterAmbient(column, SKY, waterSigma(u.uwTurbidity, u.chlorophyll)) * (0.55 + 0.45 * max(n.y, 0.0));
   color = mix(color, floor, uw);
   let fog = 1.0 - exp(-dist * 3e-5);
-  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
+  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), SKY), fog);
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
-  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, u.sunDir, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
+  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }

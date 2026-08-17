@@ -145,7 +145,7 @@ async function main() {
     const viewProj = camera.viewProj(w / h, near)
     const lensR = 0.02 + params.waterlineThickness * 0.5
     const lodScale = QUALITY[params.quality].lodScale
-    sky.render(pass, invert(viewProj), eye, sunDir, camDepth, lensR, params.uwTurbidity, params.chlorophyll)
+    sky.render(pass, invert(viewProj), eye, sunDir, camDepth, lensR, params.uwTurbidity, params.chlorophyll, params)
     ocean.render(pass, waveDt, params, noise, capNoise, viewProj, eye, sunDir, foam.index, filmFoam.index, camDepth, lodScale)
     pass.end()
     device.queue.submit([encoder.finish()])
