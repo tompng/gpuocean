@@ -3,19 +3,30 @@ import { generateGravityNoiseSet, generateCapillaryNoiseTexture, generateFoamPat
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { FoamSim } from './foam.js'
-import { ChainSim, sampleWaveLevel } from './chain.js'
+import { ChainSim, sampleWaveLevel, sampleWaveHeight } from './chain.js'
 import { buildCoast } from './coast.js'
 import { Sky } from './sky.js'
 import { OrbitCamera } from './camera.js'
 import { invert } from './mat4.js'
-import { setupUI } from './ui.js'
+import { setupUI, setupFPS, QUALITY } from './ui.js'
 import { setupNoiseDebug } from './debug.js'
 
 const canvas = document.getElementById('canvas')
 const GRAVITY = 9.81
 const CAPILLARY_SIGMA_RHO = 7.4e-5
 const CAP_DISPERSION = 1.5
-const SUN_AZIMUTH = [0.65, -0.76]
+
+// Solar elevation from clock time and latitude, at equinox declination: the
+// hour angle runs 15 deg per hour either side of local noon. Azimuth stays a
+// direct compass bearing so the sun can be aimed independently of the clock.
+function sunDirection(timeOfDay, latitude, azimuth) {
+  const hourAngle = (timeOfDay - 12) * 15 * Math.PI / 180
+  const lat = latitude * Math.PI / 180
+  const elevation = Math.asin(Math.cos(lat) * Math.cos(hourAngle))
+  const bearing = azimuth * Math.PI / 180
+  const ground = Math.cos(elevation)
+  return [ground * Math.sin(bearing), Math.sin(elevation), ground * Math.cos(bearing)]
+}
 
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
@@ -38,6 +49,8 @@ async function main() {
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
+  const reportFPS = setupFPS()
+  camera.floor = (x, z) => terrainHeightAt(x, z, params.depth)
   setupNoiseDebug([
     ...noise.variants.map(v => ({ name: v.name, size: noise.size, channels: v.channels })),
     { name: 'capillary', size: capNoise.size, channels: capNoise.channels },
@@ -53,6 +66,7 @@ async function main() {
   function frame(now) {
     const dt = Math.min((now - lastTime) / 1000, 0.1)
     lastTime = now
+    reportFPS(dt)
 
     const w = Math.max(1, Math.floor(canvas.clientWidth * devicePixelRatio))
     const h = Math.max(1, Math.floor(canvas.clientHeight * devicePixelRatio))
@@ -111,16 +125,21 @@ async function main() {
         depthClearValue: 1,
       },
     })
-    const elevation = params.sun * Math.PI / 180
-    const sunDir = [
-      SUN_AZIMUTH[0] * Math.cos(elevation),
-      Math.sin(elevation),
-      SUN_AZIMUTH[1] * Math.cos(elevation),
-    ]
-    camera.move(dt)
-    const viewProj = camera.viewProj(w / h)
-    sky.render(pass, invert(viewProj), camera.eye, sunDir)
-    ocean.render(pass, waveDt, params, noise, capNoise, viewProj, camera.eye, sunDir, foam.index, filmFoam.index)
+    const sunDir = sunDirection(params.timeOfDay, params.latitude, params.azimuth)
+    camera.update(dt)
+    const eye = camera.eye
+    // Which side of the surface the camera is on, in meters. The waterline
+    // rides the waves, so this is sampled against the live wave height rather
+    // than mean sea level — ducking under a passing crest counts as submerged
+    const camDepth = sampleWaveHeight(eye[0], eye[2], noise, waveField, ocean.layerCache) - eye[1]
+    // Pull the near plane in as the surface closes on the eye, so the water
+    // right at the lens still renders instead of being clipped to a hole
+    const near = Math.min(Math.max(0.35 * Math.abs(camDepth), 0.02), 0.5)
+    const viewProj = camera.viewProj(w / h, near)
+    const lensR = 0.02 + params.waterlineThickness * 0.5
+    const lodScale = QUALITY[params.quality].lodScale
+    sky.render(pass, invert(viewProj), eye, sunDir, camDepth, lensR, params.uwTurbidity, params.chlorophyll)
+    ocean.render(pass, waveDt, params, noise, capNoise, viewProj, eye, sunDir, foam.index, filmFoam.index, camDepth, lodScale)
     pass.end()
     device.queue.submit([encoder.finish()])
     requestAnimationFrame(frame)

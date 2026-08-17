@@ -56,6 +56,16 @@ fn filmFoamAt(b: f32, col: f32) -> vec4f {
     mix(textureLoad(filmFoamTex, vec2i(i0, j1), 0), textureLoad(filmFoamTex, vec2i(i1, j1), 0), a), fb);
 }
 
+// Caustic web on the sand: bright filaments along the zero-crossing lines of
+// two drifting noise fields. Shared by the surface (sampled at the refracted
+// bottom point, so the pattern swims with the surface) and by the sea floor
+// seen directly from underwater, so both show the same web.
+fn causticWeb(xz: vec2f) -> f32 {
+  let cs = textureSample(capTex, samp, xz / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
+         + textureSample(capTex, samp, xz / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
+  return pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
+}
+
 struct VSIn {
   @location(0) pos: vec2f,
   @location(1) cell: f32,
@@ -454,29 +464,49 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // if seen through meters of water
   let lateral = mix(1.0 / max(-refr.y, 0.05), min(1.0 / max(-refr.y, 0.05), 2.0), sbF);
   let pathLen = column * (lateral + 1.4);
-  let trans = exp(-vec3f(0.25, 0.04, 0.02) * pathLen);
-  // Caustic web on the sand: bright filaments along the zero-crossing lines of
-  // two drifting noise fields, sampled at the refracted bottom point so the
-  // pattern swims with the surface; defocus fades it with column depth
+  let trans = exp(-waterSigma(u.sTurbidity, u.chlorophyll * u.sChlorophyll) * pathLen);
+  // Sampled at the refracted bottom point so the web swims with the surface;
+  // defocus fades it with column depth
   let bottomXZ = in.world.xz + refr.xz * (column * lateral);
-  let cs = textureSample(capTex, samp, bottomXZ / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
-         + textureSample(capTex, samp, bottomXZ / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
-  let web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
+  let web = causticWeb(bottomXZ);
   // Caustics need some water column to focus in; a centimeters-thin film
   // (or the residual softmax offset on dry sand) must not carry the web
   let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * smoothstep(0.04, 0.25, column);
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
+  // -v is the ray from the eye toward this fragment
+  let uw = underwaterAt(-v, u.camDepth, u.lensR);
   let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
   // Direct sunlight in the water column fades as the sun drops; the floor
   // stands in for diffuse sky light
   let sunLevel = mix(0.18, 1.0, smoothstep(0.0, 0.5, clamp(u.sunDir.y, 0.0, 1.0)));
-  var water = mix(vec3f(0.004, 0.02, 0.05), sand, trans) * lightTint;
+  var water = mix(waterHue(u.sTurbidity, u.chlorophyll * u.sChlorophyll) * 0.16, sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
   water *= sunLevel;
   var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;
   // Dry sand above the runup line: matte, no fresnel reflection or caustics
   let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0));
   color = mix(sandMatte, color, waterM);
+  // Seen from underneath, the whole sky squeezes into Snell's window — the
+  // ~97 degree cone about vertical set by the critical angle — and outside it
+  // the surface is a perfect mirror mailing the view back down into the
+  // basin. n was already flipped to face the camera above, so it points down
+  // into the water here: exactly the inward normal refract() wants.
+  let tRay = refract(-v, n, WATER_TO_AIR);
+  let tir = dot(tRay, tRay) < 1e-6;
+  // Both the mirrored ray and the sky ray need a floor hit for the mirror
+  // term: march the reflection down to the flat basin and tint by the path
+  let mRay = reflect(-v, n);
+  let mPath = min((in.world.y + u.seaDepth) / max(-mRay.y, 0.05), 400.0);
+  let mirror = mix(waterFogAlong(mRay, u.camDepth, u.sunDir, u.uwTurbidity, u.chlorophyll), sand * lightTint * sunLevel,
+                   exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * mPath));
+  // Fresnel on the air side; at and past the critical angle it saturates to a
+  // full mirror, which is what closes the rim of the window
+  let cosAir = clamp(dot(tRay, -n), 0.0, 1.0);
+  let fresUp = select(0.02 + 0.98 * pow(1.0 - cosAir, 5.0), 1.0, tir);
+  // skyColor already carries the sun disc, so the window shows the sun on its
+  // own; the above-water spec lobe belongs to the other side of the interface
+  let underside = mix(skyColor(tRay, u.sunDir), mirror, fresUp);
+  color = mix(color, underside, uw);
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
   // so patches fragment into clumps before vanishing
@@ -506,7 +536,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);
-  color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
+  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
+  // Underwater the aerial perspective is the water column itself, and it
+  // closes in orders of magnitude faster
+  let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
+  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, u.sunDir, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }
@@ -541,8 +575,20 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0));
   let dist = distance(u.cameraPos, in.world);
   let v = normalize(u.cameraPos - in.world);
+  // Submerged, this same mesh IS the basin floor: daylight reaches it filtered
+  // by the column above, carrying the caustic web the surface focuses. Above
+  // the waterline the column is zero and it stays plain lit sand.
+  let uw = underwaterAt(-v, u.camDepth, u.lensR);
+  let column = max(-in.world.y, 0.0);
+  let focus = u.uwCaustics * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0);
+  let floorLit = 0.85 + focus * (1.6 * causticWeb(in.gridXZ) - 0.18);
+  let floor = vec3f(0.86, 0.78, 0.58) * floorLit
+            * waterAmbient(column, u.sunDir, waterSigma(u.uwTurbidity, u.chlorophyll)) * (0.55 + 0.45 * max(n.y, 0.0));
+  color = mix(color, floor, uw);
   let fog = 1.0 - exp(-dist * 3e-5);
-  color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
+  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
+  let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
+  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, u.sunDir, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }

@@ -267,6 +267,29 @@ export function sampleWaveLevel(x, z, noise, waveField, layers) {
   return hsum * DRIVE_LEVEL / SLOPE
 }
 
+// Wave height at a world XZ, mirroring the vertex shader's height accumulation
+// in sampleWaves (shoreHeightScale and the softmax floor are applied by the
+// caller). Sampled at the undisplaced coordinate: the true surface is
+// parametric in the choppiness displacement, so near steep crests this is off
+// by the displacement — close enough to decide which side of the surface a
+// point is on, which is all the camera needs.
+export function sampleWaveHeight(x, z, noise, waveField, layers) {
+  const texH = noise.channels.height
+  const size = noise.size
+  const copies = waveField.data
+  let hsum = 0
+  for (const l of layers) {
+    const u0 = (x * l.dx + z * l.dz) * l.invL + l.su
+    const v0 = (-x * l.dz + z * l.dx) * l.invL + l.sv
+    let sh = 0
+    for (let k = 0; k < 3; k++) {
+      sh += copies[k * 4 + 2] * bilinearWrap(texH, size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
+    }
+    hsum += l.amp * sh
+  }
+  return hsum
+}
+
 function bilinearWrap(tex, size, u, v) {
   const x = (u - Math.floor(u)) * size
   const y = (v - Math.floor(v)) * size

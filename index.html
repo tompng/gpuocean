@@ -8,13 +8,25 @@
   html, body { margin: 0; height: 100%; overflow: hidden; }
   #canvas { width: 100%; height: 100%; display: block; touch-action: none; }
   #panel {
-    position: fixed; top: 10px; left: 10px; padding: 10px 14px;
-    background: rgba(10, 20, 30, 0.6); color: #eee; border-radius: 8px;
-    font: 12px/1.8 system-ui, sans-serif; user-select: none;
+    position: fixed; top: 10px; left: 10px; max-height: calc(100vh - 40px);
+    width: 300px; overflow-y: auto; padding: 10px 14px;
+    background: rgba(10, 20, 30, 0.66); color: #eee; border-radius: 8px;
+    font: 12px/1.7 system-ui, sans-serif; user-select: none;
+    backdrop-filter: blur(6px);
   }
-  #panel summary { cursor: pointer; font-weight: 600; }
-  #panel label { display: grid; grid-template-columns: 80px 140px 36px; gap: 8px; align-items: center; }
-  #panel span { text-align: right; }
+  #panel > summary { cursor: pointer; font-weight: 600; list-style: none; display: flex; gap: 8px; align-items: baseline; }
+  #panel > summary::-webkit-details-marker { display: none; }
+  #fps { margin-left: auto; font-variant-numeric: tabular-nums; opacity: 0.75; font-weight: 400; }
+  #panel section { margin-top: 10px; }
+  #panel section > h3 {
+    margin: 0 0 2px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; opacity: 0.5; border-bottom: 1px solid rgba(255,255,255,0.12); padding-bottom: 2px;
+  }
+  #panel label { display: grid; grid-template-columns: 96px 1fr 34px; gap: 8px; align-items: center; }
+  #panel label > span { text-align: right; font-variant-numeric: tabular-nums; opacity: 0.8; }
+  #panel input[type=range] { width: 100%; min-width: 0; }
+  #panel select { width: 100%; background: rgba(255,255,255,0.1); color: #eee; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 1px 3px; }
+  #hint { margin: 10px 0 0; opacity: 0.55; line-height: 1.5; }
   #noiseDebug {
     position: fixed; top: 10px; right: 10px; bottom: 10px; overflow: auto;
     display: none; flex-direction: column; gap: 10px;
@@ -31,29 +43,9 @@
 <body>
 <canvas id="canvas"></canvas>
 <details id="panel" open>
-  <summary>params</summary>
-  <label>wavelength <input id="wavelength" type="range" min="5" max="60" step="1" value="10"><span></span></label>
-  <label>amplitude <input id="amplitude" type="range" min="0" max="2" step="0.02" value="0.2"><span></span></label>
-  <label>choppiness <input id="choppiness" type="range" min="0" max="3" step="0.05" value="1.5"><span></span></label>
-  <label>layers <input id="layers" type="range" min="1" max="8" step="1" value="5"><span></span></label>
-  <label>spread <input id="spread" type="range" min="0" max="90" step="1" value="40"><span></span></label>
-  <label>waveDir <input id="waveDir" type="range" min="-60" max="60" step="1" value="0"><span></span></label>
-  <label>dispersion <input id="dispersion" type="range" min="0" max="2" step="0.05" value="1"><span></span></label>
-  <label>ripple <input id="ripple" type="range" min="0" max="0.6" step="0.01" value="0.2"><span></span></label>
-  <label>rippleScale <input id="rippleScale" type="range" min="0.05" max="2.5" step="0.01" value="0.5"><span></span></label>
-  <label>rippleAniso <input id="rippleAniso" type="range" min="0" max="1" step="0.05" value="0.8"><span></span></label>
-  <label>rippleBias <input id="rippleBias" type="range" min="0" max="1" step="0.05" value="0.8"><span></span></label>
-  <label>sss <input id="sss" type="range" min="0" max="1.5" step="0.05" value="1.5"><span></span></label>
-  <label>depth <input id="depth" type="range" min="0.5" max="40" step="0.5" value="8"><span></span></label>
-  <label>caustics <input id="caustics" type="range" min="0" max="2" step="0.05" value="1"><span></span></label>
-  <label>sun <input id="sun" type="range" min="2" max="60" step="1" value="10"><span></span></label>
-  <label>lean <input id="lean" type="range" min="0" max="3" step="0.05" value="0.5"><span></span></label>
-  <label>foam <input id="foam" type="range" min="0" max="1" step="0.02" value="0.6"><span></span></label>
-  <label>foamLife <input id="foamLife" type="range" min="0.5" max="12" step="0.5" value="4"><span></span></label>
-  <label>foamScale <input id="foamScale" type="range" min="0.5" max="3" step="0.05" value="1"><span></span></label>
-  <label>pause <input id="pause" type="checkbox"></label>
-  <label>wireframe <input id="wireframe" type="checkbox"></label>
-  <label>noise <input id="noiseView" type="checkbox"></label>
+  <summary>params <span id="fps">—</span></summary>
+  <div id="controls"></div>
+  <p id="hint">drag orbit (up past level to dive under) · right/shift-drag pan · wheel zoom · WASD move</p>
 </details>
 <div id="noiseDebug"></div>
 <div id="error"></div>

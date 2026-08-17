@@ -1,9 +1,14 @@
 struct Uniforms {
   invViewProj: mat4x4f,
   cameraPos: vec3f,
-  pad0: f32,
+  // Camera port radius: the width of the waterline split
+  lensR: f32,
   sunDir: vec3f,
-  pad1: f32,
+  // Meters the camera sits below the local water surface; negative in air
+  camDepth: f32,
+  turbidity: f32,
+  chlorophyll: f32,
+  pad2: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -27,6 +32,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let far = u.invViewProj * vec4f(in.ndc, 1.0, 1.0);
   let dir = normalize(far.xyz / far.w - u.cameraPos);
   var c = skyColor(dir, u.sunDir);
+  // Submerged there is no sky to see: this pass only fills what the surface
+  // and floor meshes leave open, and what fills it is the murk, brightening
+  // toward the daylight above
+  let volume = waterFogAlong(dir, u.camDepth, u.sunDir, u.turbidity, u.chlorophyll);
+  // Per-pixel, so a camera at the surface keeps real sky above the waterline
+  // instead of fogging the whole frame
+  c = mix(c, volume, underwaterAt(dir, u.camDepth, u.lensR));
   c = 1.0 - exp(-1.8 * c);
   return vec4f(pow(c, vec3f(1.0 / 2.2)), 1.0);
 }

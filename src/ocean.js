@@ -35,6 +35,9 @@ const RIBBON_SPAN = 28
 const RIBBON_CELLS = 140
 // Rise time of foam generation, roughly the crest's texel-crossing time [s]
 const FOAM_RISE = 0.08
+// Uniforms struct size in floats; must stay a multiple of 4 (16-byte struct
+// alignment) and match the tail of Uniforms in wave_common.wgsl
+const UNIFORM_FLOATS = 180
 
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, simView, coastView, sdfView, mainTableView, format, opts = {}) {
@@ -100,7 +103,7 @@ export class Ocean {
     }))
 
     this.uniform = device.createBuffer({
-      size: 672,
+      size: UNIFORM_FLOATS * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const sampler = device.createSampler({
@@ -155,11 +158,11 @@ export class Ocean {
     this.time = 0
     this.phases = new Float64Array(MAX_LAYERS)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
-    this.uniformData = new Float32Array(168)
+    this.uniformData = new Float32Array(UNIFORM_FLOATS)
     this.layerCache = []
   }
 
-  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex, filmIndex) {
+  render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex, filmIndex, camDepth, lodScale) {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
@@ -227,7 +230,7 @@ export class Ocean {
     u[146] = params.sss
     u[147] = 1 / Math.max(params.amplitude, 0.01)
     u[148] = params.depth
-    u[149] = params.caustics
+    u[149] = params.sCaustics
     // caustic web cells scale with the ripple wavelength; 0.6 is the tuned default
     u[150] = params.rippleScale / 0.6
     const meanLen = Math.hypot(meanX, meanZ) || 1
@@ -262,6 +265,21 @@ export class Ocean {
     u[165] = this.chain.zBase
     u[166] = this.chain.lastShift
     u[167] = this.chain.tCamSnap
+    u[168] = camDepth
+    // waterlineThickness is authored 0..1; as a port radius that is a few cm
+    // to half a meter, which is the range over which the split reads as a lens
+    u[169] = 0.02 + params.waterlineThickness * 0.5
+    u[170] = params.uwTurbidity
+    u[171] = params.uwFog
+    u[172] = params.uwCaustics
+    u[173] = params.distortionStrength
+    u[174] = params.distortionScale
+    u[175] = params.particleDensity
+    u[176] = params.rippleStrength
+    u[177] = params.sTurbidity
+    u[178] = params.sChlorophyll
+    u[179] = params.chlorophyll
+    u[180] = lodScale
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength

@@ -53,6 +53,24 @@ struct Uniforms {
   simZShift: f32,
   // camera's coast arclength, snapped to the ribbon row pitch
   simTCam: f32,
+  // Meters the camera sits below the local water surface; negative in air
+  camDepth: f32,
+  // Camera port radius: the width of the waterline split (waterlineThickness)
+  lensR: f32,
+  // (uw) group
+  uwTurbidity: f32,
+  uwFog: f32,
+  uwCaustics: f32,
+  distortionStrength: f32,
+  distortionScale: f32,
+  particleDensity: f32,
+  rippleStrength: f32,
+  // (s) group
+  sTurbidity: f32,
+  sChlorophyll: f32,
+  // (b) group: one value used by both sides
+  chlorophyll: f32,
+  lodScale: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
