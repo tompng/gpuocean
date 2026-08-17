@@ -79,11 +79,14 @@ export class Ocean {
         ],
       }],
     })
+    // Back faces only exist where choppiness folds the surface over; culling
+    // them lets the front-facing sheets win instead of showing the inverted
+    // flap (the crease itself sits in the foam-generating region anyway)
     const makePipeline = (vsEntry, fsEntry, topology) => device.createRenderPipeline({
       ...base,
       vertex: vertex(vsEntry),
       fragment: { module, entryPoint: fsEntry, targets: [{ format }] },
-      primitive: { topology },
+      primitive: topology === 'triangle-list' ? { topology, cullMode: 'back' } : { topology },
     })
     this.fillGridPipeline = makePipeline('vs_grid', 'fs', 'triangle-list')
     this.fillRibbonPipeline = makePipeline('vs', 'fs', 'triangle-list')
