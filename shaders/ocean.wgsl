@@ -358,11 +358,8 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
   return NormalSample(normalize(cross(dPz, dPx)), jac, sigma, sigmaP);
 }
 
-// far-foam calibration: extra crest passages counted per foam lifetime,
-// and the softness of the quantile cut in sigma units (stands in for the
-// decayed brightness spread of real wakes)
+// far-foam calibration: extra crest passages counted per foam lifetime
 const SWEEP_K: f32 = 1.2;
-const FAR_SOFT: f32 = 0.8;
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
@@ -424,7 +421,17 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let waterGateF = smoothstep(0.0, 0.3, in.world.y - ty);
   let depthF = max(-ty, 0.05);
   let genSurfF = smoothstep(0.55, 0.9, in.world.y / depthF) * smoothstep(0.0, 0.5, depthF) * waterGateF;
-  let farR = max(smoothstep(zQ, zQ - FAR_SOFT, zNow) * waterGateF, genSurfF);
+  // The stand-in value must keep VARYING across its covered region: the
+  // erosion reads it as a pattern threshold, so any plateau (a saturating
+  // ramp) paints textureless flat white — the buffer's wakes always carry
+  // their decay gradient. A soft exponential saturation only approaches
+  // its ceiling, so a gradient survives everywhere; its width follows the
+  // z-distribution's conditional tail beyond the quantile, and the
+  // visibility level (~0.48) still crosses at the calibrated point, so the
+  // matched coverage is untouched.
+  let tailW = 1.0 / (1.0 + abs(zQ));
+  let farJ = clamp(0.48 + 0.45 * (1.0 - exp((zNow - zQ + 0.28) / tailW)), 0.0, 1.0);
+  let farR = max(farJ * waterGateF, genSurfF);
   // From high above, fragments inside the window are still far from the
   // camera: the buffer's wake shapes resolve to speckle while its
   // character differs from the stand-in outside, so the boundary shows.
