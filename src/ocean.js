@@ -37,10 +37,10 @@ const RIBBON_CELLS = 140
 const FOAM_RISE = 0.08
 // Uniforms struct size in floats; must stay a multiple of 4 (16-byte struct
 // alignment) and match the tail of Uniforms in wave_common.wgsl
-const UNIFORM_FLOATS = 180
+const UNIFORM_FLOATS = 196
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, simView, coastView, sdfView, mainTableView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -55,6 +55,7 @@ export class Ocean {
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d-array' } },
         { binding: 7, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 8, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
@@ -127,6 +128,7 @@ export class Ocean {
         ...entries,
         { binding: 4, resource: view },
         { binding: 5, resource: patternView },
+        { binding: 6, resource: foamPlates.texture.createView({ dimension: '2d-array' }) },
         { binding: 7, resource: simView },
         { binding: 8, resource: coastView },
         { binding: 9, resource: sdfView },
@@ -238,8 +240,9 @@ export class Ocean {
     u[152] = params.lean * meanZ / meanLen
     u[153] = params.foam
     u[154] = FOAM_REGION
-    u[155] = Math.exp(-dt / params.foamLife)
-    u[156] = Math.exp(-dt / (params.foamLife * 0.25))
+    const life = params.foamLife * Math.max(params.persistence, 0.01)
+    u[155] = Math.exp(-dt / life)
+    u[156] = Math.exp(-dt / (life * 0.25))
     u[157] = Math.exp(-dt / FOAM_RISE)
     u[158] = params.foamLife
     u[159] = SLOPE
@@ -280,10 +283,25 @@ export class Ocean {
     u[178] = params.sChlorophyll
     u[179] = params.chlorophyll
     u[180] = lodScale
+    u[181] = params.noiseScale
+    u[182] = params.noiseSpeed
+    // smoothstep(a, a, x) is a divide by zero in WGSL, and both ramps can be
+    // collapsed from the sliders, so separate the endpoints here
+    u[183] = params.laceLow
+    u[184] = Math.max(params.laceHigh, params.laceLow + 1e-3)
+    u[185] = params.crestStart
+    u[186] = Math.max(params.crestFull, params.crestStart + 1e-3)
+    u[187] = params.opacity
+    u[188] = params.crestScale
+    u[189] = Math.max(params.contactWidth, 1e-3)
+    u[190] = params.streaks
+    u[191] = params.shoreWidth
+    u[192] = params.lapOvershoot
+    u[193] = params.surgeRate
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength
-    u[164] = params.foamScale
+    u[164] = 1
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
     const wire = params.wireframe

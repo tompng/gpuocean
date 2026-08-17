@@ -180,6 +180,96 @@ export function generateFoamPatternTexture(device, opts = {}) {
   return { texture, size, channels: { pattern: density } }
 }
 
+// Photographic foam plates, loaded as one array texture so the shader can
+// blend across the coverage ramp with a single binding. Decoded with
+// colorSpaceConversion 'none' into a non-sRGB format on purpose: these are
+// density masks compared against a threshold, not radiometric colour, and an
+// sRGB decode would silently re-tune the erosion ramp.
+export async function loadFoamPlates(device, urls) {
+  const bitmaps = await Promise.all(urls.map(async url => {
+    const blob = await (await fetch(url)).blob()
+    return createImageBitmap(blob, { colorSpaceConversion: 'none' })
+  }))
+  const size = bitmaps[0].width
+  const mipCount = Math.floor(Math.log2(size)) + 1
+  const texture = device.createTexture({
+    size: [size, size, bitmaps.length],
+    format: 'r8unorm',
+    mipLevelCount: mipCount,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  })
+  bitmaps.forEach((source, layer) => {
+    device.queue.copyExternalImageToTexture(
+      { source },
+      { texture, origin: [0, 0, layer] },
+      [size, size, 1],
+    )
+    source.close()
+  })
+  // copyExternalImageToTexture writes level 0 only; without the rest the
+  // distant water samples undefined levels and reads as noise
+  generateMips(device, texture, bitmaps.length, mipCount)
+  return { texture, size, layers: bitmaps.length }
+}
+
+// Successive halving blits. The plates tile, so the sampler must repeat —
+// clamping would bias the seam texels at every level and break the tiling.
+function generateMips(device, texture, layers, mipCount) {
+  const module = device.createShaderModule({
+    code: `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  let xy = vec2f(vec2u((vi << 1u) & 2u, vi & 2u)) * 2.0 - 1.0;
+  var o: VSOut;
+  o.pos = vec4f(xy, 0.0, 1.0);
+  o.uv = xy * vec2f(0.5, -0.5) + 0.5;
+  return o;
+}
+@fragment fn fs(in: VSOut) -> @location(0) vec4f {
+  return textureSample(src, samp, in.uv);
+}`,
+  })
+  const pipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module, entryPoint: 'vs' },
+    fragment: { module, entryPoint: 'fs', targets: [{ format: 'r8unorm' }] },
+  })
+  const sampler = device.createSampler({
+    addressModeU: 'repeat',
+    addressModeV: 'repeat',
+    magFilter: 'linear',
+    minFilter: 'linear',
+  })
+  const encoder = device.createCommandEncoder()
+  for (let layer = 0; layer < layers; layer++) {
+    for (let level = 1; level < mipCount; level++) {
+      const view = base => texture.createView({
+        dimension: '2d',
+        baseMipLevel: base,
+        mipLevelCount: 1,
+        baseArrayLayer: layer,
+        arrayLayerCount: 1,
+      })
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: view(level), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+      })
+      pass.setPipeline(pipeline)
+      pass.setBindGroup(0, device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: view(level - 1) },
+          { binding: 1, resource: sampler },
+        ],
+      }))
+      pass.draw(3)
+      pass.end()
+    }
+  }
+  device.queue.submit([encoder.finish()])
+}
+
 function bandpass2D(src, size, sigmaSmall, sigmaLarge) {
   const a = smoothAxisX(src, size, sigmaSmall)
   smoothAxisYInPlace(a, size, sigmaSmall)

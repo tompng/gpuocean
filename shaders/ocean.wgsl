@@ -1,6 +1,9 @@
 @group(0) @binding(3) var capTex: texture_2d<f32>;
 @group(0) @binding(4) var foamTex: texture_2d<f32>;
 @group(0) @binding(5) var foamPatTex: texture_2d<f32>;
+// Photographic foam plates, ordered along the coverage ramp:
+// 0 sparse lace, 1 mid sheets with flow streaks, 2 dense bubble raft
+@group(0) @binding(6) var foamPlates: texture_2d_array<f32>;
 // Coast table: per column (P.x, P.z, N.x, N.z), written by chain.js
 @group(0) @binding(8) var coastTex: texture_2d<f32>;
 @group(1) @binding(0) var filmFoamTex: texture_2d<f32>;
@@ -64,6 +67,35 @@ fn causticWeb(xz: vec2f) -> f32 {
   let cs = textureSample(capTex, samp, xz / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
          + textureSample(capTex, samp, xz / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
   return pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
+}
+
+// Foam density at a point, built from the three plates.
+//
+// The plates span the coverage ramp — lace between dark water, then broken
+// sheets with holes and flow edges, then near-solid raft — and the SAME
+// coverage that picks between them also sets the erosion threshold below, so
+// plate and cut always agree.
+//
+// Their densities are blended and the result eroded once. Eroding each plate
+// and cross-fading the three masks instead would give half-grey ghost foam
+// everywhere two overlap, because the masks are near-binary.
+fn foamPlate(xz: vec2f, flow: vec2f, cover: f32) -> f32 {
+  let s = 1.0 / (5.0 * u.noiseScale);
+  let drift = 0.25 * u.noiseSpeed * u.time;
+  // Sparse never drifts: it is the stranded residue at the high-water mark and
+  // has to stay locked to the water it was deposited on
+  let sparse = textureSample(foamPlates, samp, xz * s, 0).r;
+  // Mid shears along the flow. The shear is area-preserving (stretch along by
+  // k, squeeze across by k), so streaks lengthen without thinning.
+  let k = 1.0 + 3.0 * u.streaks;
+  let along = dot(xz, flow) / k + drift;
+  let across = dot(xz, vec2f(-flow.y, flow.x)) * k;
+  let mid = textureSample(foamPlates, samp, vec2f(along, across) * s, 1).r;
+  // The raft on a fresh crest is the part that visibly churns, so it drifts
+  // faster; 2.2 keeps it inherently finer than the lace
+  let dense = textureSample(foamPlates, samp, (xz + flow * (drift * 1.7)) * (s * 2.2 / u.crestScale), 2).r;
+  return mix(mix(sparse, mid, smoothstep(u.laceLow, u.laceHigh, cover)),
+             dense, smoothstep(u.crestStart, u.crestFull, cover));
 }
 
 struct VSIn {
@@ -520,19 +552,23 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Eroding a single pattern at blended coordinates smears it into
   // streaks across the handover where the frames diverge.
   let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
-  let patWave = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
+  // The dominant wave direction orients the streak shear
+  let waveFlow = u.layers[0].dirScaleAmp.xy;
+  let patWave = foamPlate(in.gridXZ, waveFlow, accR);
   // Over-compressed foam filaments merge instead of thinning forever: as
-  // the film compresses, blend toward a pattern that is coarser in the
-  // cross-shore direction only, so the rendered streaks stop shrinking
-  let patFilmUV = vec2f(in.st.x, colT(in.st.y)) / (5.0 * u.foamScale);
-  let patFine = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 3.0, patFilmUV.y)).r;
-  let patCoarse = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 9.0, patFilmUV.y)).r;
-  let patFilm = mix(patFine, patCoarse, 1.0 - smoothstep(0.07, 0.4, in.stretch));
+  // the film compresses, coarsen in the cross-shore direction only, so the
+  // rendered streaks stop shrinking. In the film frame flow is +band.
+  let bStretch = mix(3.0, 9.0, 1.0 - smoothstep(0.07, 0.4, in.stretch));
+  let filmCover = filmAcc.b + filmAcc.r * 0.8;
+  let patFilm = foamPlate(vec2f(in.st.x / bStretch, colT(in.st.y)), vec2f(1.0, 0.0), filmCover);
   let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR));
-  let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * (filmAcc.b + filmAcc.r * 0.8)));
+  let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * filmCover));
+  // The unbroken lip at the swash front: a thin water column carries a bright
+  // rim independently of accumulation, gated so a dead-calm film grows none
+  let rim = smoothstep(0.25 * u.contactWidth, 0.0, column) * smoothstep(0.02, 0.15, filmAcc.b);
   // the masks are thresholded 0/1 fields, so foam is present when either
   // system says so — a blend would half-fade both across the handover
-  let foamMask = min(maskWave + maskFilm, 1.0);
+  let foamMask = min(maskWave + maskFilm + rim, 1.0) * u.opacity;
   let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0));
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);

@@ -1,5 +1,5 @@
 import { initWebGPU, fetchText } from './gpu.js'
-import { generateGravityNoiseSet, generateCapillaryNoiseTexture, generateFoamPatternTexture } from './noise.js'
+import { generateGravityNoiseSet, generateCapillaryNoiseTexture, generateFoamPatternTexture, loadFoamPlates } from './noise.js'
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { FoamSim } from './foam.js'
@@ -38,11 +38,18 @@ async function main() {
   const waveField = new WaveField(device, waveFieldCode, noise)
   const capField = new WaveField(device, waveFieldCode, capNoise)
   const foamPattern = generateFoamPatternTexture(device)
+  // Coverage ramp order — sparse lace, mid sheets, dense raft. NOT filename
+  // order: foam4 is the mid plate and foam3 the dense one.
+  const foamPlates = await loadFoamPlates(device, [
+    new URL('../foam2-B6vBNkcW.jpg', import.meta.url),
+    new URL('../foam4-XPoWFsfC.jpg', import.meta.url),
+    new URL('../foam3-CyaGqCrv.jpg', import.meta.url),
+  ])
   const foam = new FoamSim(device, waveCommonCode + foamCode)
   const coast = buildCoast(device)
   const chain = new ChainSim(device, coast)
   const filmFoam = new FoamSim(device, waveCommonCode + filmFoamCode, [128, 256])
-  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, format)
+  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, foamPlates, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, format)
   foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
   filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain

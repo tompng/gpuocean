@@ -78,7 +78,6 @@ const SPEC = [
     group: 'foam', items: [
       { id: 'foam', min: 0, max: 1, step: 0.02, value: 0.6 },
       { id: 'foamLife', min: 0.5, max: 12, step: 0.5, value: 4 },
-      { id: 'foamScale', min: 0.5, max: 3, step: 0.05, value: 1 },
       { id: 'shoreWidth', min: 0.2, max: 4, step: 0.05, value: 1 },
       { id: 'lapOvershoot', min: 0, max: 2, step: 0.05, value: 0.6 },
       { id: 'noiseScale', min: 0.2, max: 4, step: 0.05, value: 1 },

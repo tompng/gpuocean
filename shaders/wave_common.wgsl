@@ -45,8 +45,14 @@ struct Uniforms {
   foamDecaySwallow: f32,
   simDt: f32,
   waveK: f32,
+<<<<<<< HEAD
   padC: f32,
   foamScale: f32,
+=======
+  shoreCurve: f32,
+  // retired: the foam plates carry their own scale via noiseScale
+  foamScaleUnused: f32,
+>>>>>>> dea1a73 (feat(foam): drive foam from photographic plates)
   // mainland film window: center z (follows the camera in whole-column
   // steps) and this frame's shift in film-foam buffer rows
   simZBase: f32,
@@ -71,6 +77,23 @@ struct Uniforms {
   // (b) group: one value used by both sides
   chlorophyll: f32,
   lodScale: f32,
+  // foam plates
+  noiseScale: f32,
+  noiseSpeed: f32,
+  laceLow: f32,
+  laceHigh: f32,
+  crestStart: f32,
+  crestFull: f32,
+  opacity: f32,
+  crestScale: f32,
+  contactWidth: f32,
+  streaks: f32,
+  shoreWidth: f32,
+  lapOvershoot: f32,
+  surgeRate: f32,
+  fPad0: f32,
+  fPad1: f32,
+  fPad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
