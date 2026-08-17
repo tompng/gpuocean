@@ -65,6 +65,63 @@ cool-tinted and gated on actually being above the horizon, so a moonless night
 goes dark rather than resting on a floor. The water carries a separate glitter
 lobe for it.
 
+## Clouds and shadows
+
+The cloud deck is evaluated inside `skyColor()`, which is the single door every
+sky lookup already goes through — the dome, the surface's mirror reflection,
+Snell's window from underwater, and the aerial-perspective fog. So clouds are
+reflected and refracted with no extra code, and the reflection cannot show a
+different sky than the sky above it: they are the same function of direction.
+
+Cloud parameters live in their own uniform block declared in
+`shaders/atmosphere.wgsl` rather than in either pass's `Uniforms`. That file is
+prepended to two modules whose `u` differ — `sky.wgsl` has no clock at all — so
+shared code cannot read `u`. Declaring the block in the shared text makes the
+binding and layout identical in both modules by construction, and both bind
+groups point at one buffer.
+
+The deck is a spherical shell, not a flat layer. A flat layer is hit at
+`t = (altitude - eyeY) / dir.y`, which diverges as the ray levels out, so cloud
+detail compresses without bound into the horizon line — the one place an ocean
+renderer cannot afford to alias. Clouds occlude rather than blend: everything
+behind them is multiplied by transmittance, which is what dims and reddens the
+sun going behind one.
+
+Shadows multiply per term with an explicit direct fraction, never into
+`sunLevel()`. Folding them in would scale the daylight floor, the moon handover
+and every dome-lit term at once, and an overcast sky would turn the water black
+instead of flat and dim. The reflection, the window and the aerial perspective
+are deliberately never attenuated — the reflected dome is what keeps a shadowed
+patch blue.
+
+## Submerged bodies
+
+A small field of analytic ellipsoids rests on the bed. One array of eight
+`vec4f` is the single source of truth: the vertex shader that draws them, the
+sun-visibility test, and the mid-water cone all read it, so a rock and its
+shadow cannot drift apart the way a mesh and a shadow map can.
+
+Shadows are analytic rather than shadow-mapped for reasons specific to this
+renderer: the camera-following warped grid is both the principal receiver and
+the principal caster and spans 0.4 m to kilometre cells in one mesh, so no
+single depth bias serves it; the bed is shaded twice (directly and in the
+refraction pass) and those fragments are coincident at the waterline, so they
+must agree exactly; and the sun refracts entering the water, which an
+orthographic depth pass along the air-side sun direction cannot represent.
+
+The mid-water shadow needs no ray march. In a body's own normalised space the
+ellipsoid is the unit sphere, so its shadow volume is a cylinder about the light
+axis — one quadratic — and the underwater in-scatter is already a homogeneous
+integral, from which removing a segment is closed form.
+
+A shadow multiplies the whole caustic term, including its negative
+inter-filament lobe, because the web is the focused direct beam. It never
+multiplies the ambient share, which is what stops a shadow reaching black.
+
+Placement searches rather than hardcodes: the coastline is authored data with an
+island and a cape, so each body walks seaward against the same baked SDF the
+shader samples until the bed is deep enough to cover it.
+
 ## Foam
 
 Foam coverage accumulates from wave-field folding offshore and from swash
