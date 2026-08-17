@@ -35,12 +35,16 @@ export class WaveField {
       magFilter: 'linear',
       minFilter: 'linear',
     })
+    // single-texture noises (capillary) bind the same texture to all copies
+    const texs = noise.textures ?? [noise.texture, noise.texture, noise.texture]
     this.bindGroup = device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniform } },
         { binding: 1, resource: sampler },
-        { binding: 2, resource: noise.texture.createView() },
+        { binding: 2, resource: texs[0].createView() },
+        { binding: 3, resource: texs[1].createView() },
+        { binding: 4, resource: texs[2].createView() },
       ],
     })
 

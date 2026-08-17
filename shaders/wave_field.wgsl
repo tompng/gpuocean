@@ -5,7 +5,10 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
-@group(0) @binding(2) var noiseTex: texture_2d<f32>;
+// one noise variant per scrolled copy (different band orientations)
+@group(0) @binding(2) var noiseTex0: texture_2d<f32>;
+@group(0) @binding(3) var noiseTex1: texture_2d<f32>;
+@group(0) @binding(4) var noiseTex2: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -23,9 +26,8 @@ fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
-  var acc = vec4f(0.0);
-  for (var i = 0; i < 3; i++) {
-    acc += u.copies[i].z * textureSampleLevel(noiseTex, samp, in.uv + u.copies[i].xy, 0.0);
-  }
+  var acc = u.copies[0].z * textureSampleLevel(noiseTex0, samp, in.uv + u.copies[0].xy, 0.0);
+  acc += u.copies[1].z * textureSampleLevel(noiseTex1, samp, in.uv + u.copies[1].xy, 0.0);
+  acc += u.copies[2].z * textureSampleLevel(noiseTex2, samp, in.uv + u.copies[2].xy, 0.0);
   return acc;
 }

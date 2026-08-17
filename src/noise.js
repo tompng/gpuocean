@@ -1,50 +1,92 @@
 import { floatToHalf } from './gpu.js'
 
-// Gravity-wave noise texture.
+// Gravity-wave noise texture set.
 // R: height, G: horizontal displacement, B: dh/dx, A: dh/dy.
 // For η = A cos(kx − ωt) traveling +x, the particle displacement is −A sin(kx − ωt),
 // so G is the NEGATED x-cumsum of height (positive cumsum would sharpen troughs, not crests).
-// Height is band-passed along x: the cumsum has 1/k gain, so without a band-pass
-// tile-sized components would dominate the displacement channel.
-// Built in the frequency domain: the circular combo smoothing is
-// multiplication by the DFT of its impulse response, the band-pass is the
-// transfer difference, per-row mean removal is the kx = 0 plane, and the
-// displacement cumsum is division by 1 - e^{-iω} — each the exact spectral
-// counterpart of the equivalent spatial operation.
-export function generateGravityNoiseTexture(device, opts = {}) {
+// Height is band-passed along the travel axis: the cumsum has 1/k gain, so
+// without a band-pass tile-sized components would dominate the displacement.
+//
+// Built in the frequency domain, which makes the band orientation a free
+// parameter with exact tiling: the transfer is evaluated at frequencies
+// rotated by the variant's angle, and the displacement cumsum divides by
+// 1 - e^{-iω} along the rotated travel axis. Three independent variants
+// (straight and ±ANGLE) feed the wave field's three scrolled copies, so a
+// still frame shows 3 pattern orientations per layer instead of one.
+const VARIANT_ANGLE = 10 * Math.PI / 180
+const VARIANT_SEEDS = [23456, 12345, 34567]
+
+export function generateGravityNoiseSet(device, opts = {}) {
   const size = opts.size ?? 512
+  const angles = opts.angles ?? [-VARIANT_ANGLE, 0, VARIANT_ANGLE]
+  const variants = angles.map((angle, i) =>
+    gravityChannels(size, opts, VARIANT_SEEDS[i], angle))
+  // one dispGradPerTexel serves all variants, so every d channel divides by
+  // the SAME sigma (the straight variant's); the ~1% per-variant variance
+  // difference is harmless, a mismatched gradient scale is not
+  const sigmaD = variants[1].sigmaD
+  const textures = []
+  const heights = []
+  for (const v of variants) {
+    for (let i = 0; i < v.d.length; i++) v.d[i] /= -sigmaD
+    const [hx, hy] = gradients(v.h, size)
+    textures.push(createNoiseTexture(device, size, v.h, v.d, hx, hy))
+    heights.push(v.h)
+  }
+  const [hx0] = gradients(variants[1].h, size)
+  return {
+    textures,
+    size,
+    wavesPerTile: wavesPerTile(variants[1].h, hx0, size),
+    dispGradPerTexel: -1 / sigmaD,
+    heights,
+    variants: angles.map((angle, i) => ({
+      name: `gravity ${Math.round(angle * 180 / Math.PI)}deg`,
+      channels: { height: variants[i].h, disp: variants[i].d },
+    })),
+  }
+}
+
+function gravityChannels(size, opts, seed, angle) {
   const sigmaAlong = opts.sigmaAlong ?? 3
   const sigmaAlongWide = opts.sigmaAlongWide ?? 9
   const sigmaCross = opts.sigmaCross ?? 14
-  const random = mulberry32(opts.seed ?? 12345)
+  const random = mulberry32(seed)
 
   const n = size * size
   const re = new Float64Array(n)
   const im = new Float64Array(n)
-  const noise = randomArray(random, n)
-  re.set(noise)
+  re.set(randomArray(random, n))
   fft2d(re, im, size, false)
 
-  const tAlong = comboTransfer(size, sigmaAlong)
-  const tWide = comboTransfer(size, sigmaAlongWide)
-  const tCross = comboTransfer(size, sigmaCross)
+  const ca = Math.cos(angle)
+  const sa = Math.sin(angle)
   const dRe = new Float64Array(n)
   const dIm = new Float64Array(n)
   for (let ky = 0; ky < size; ky++) {
+    const wy = 2 * Math.PI * (ky > size / 2 ? ky - size : ky) / size
     for (let kx = 0; kx < size; kx++) {
       const i = ky * size + kx
-      const g = kx === 0 ? 0 : (tAlong[kx] - tWide[kx]) * tCross[ky]
+      const wx = 2 * Math.PI * (kx > size / 2 ? kx - size : kx) / size
+      const wAlong = wx * ca + wy * sa
+      const wCross = -wx * sa + wy * ca
+      const g = (comboTransferAt(sigmaAlong, wAlong) - comboTransferAt(sigmaAlongWide, wAlong))
+        * comboTransferAt(sigmaCross, wCross)
       const hr = re[i] * g
       const hi = im[i] * g
       re[i] = hr
       im[i] = hi
-      if (kx !== 0) {
-        const w = 2 * Math.PI * kx / size
-        const ar = 1 - Math.cos(w)
-        const ai = Math.sin(w)
-        const m = ar * ar + ai * ai
+      // cumsum along the travel axis; the band-pass vanishes quadratically
+      // at wAlong = 0, so the 1/w pole is harmless away from exact zero
+      const ar = 1 - Math.cos(wAlong)
+      const ai = Math.sin(wAlong)
+      const m = ar * ar + ai * ai
+      if (m > 1e-12) {
         dRe[i] = (hr * ar + hi * ai) / m
         dIm[i] = (hi * ar - hr * ai) / m
+      } else {
+        re[i] = 0
+        im[i] = 0
       }
     }
   }
@@ -63,17 +105,7 @@ export function generateGravityNoiseTexture(device, opts = {}) {
   }
   let dSq = 0
   for (let i = 0; i < n; i++) dSq += d[i] * d[i]
-  const sigmaD = Math.sqrt(dSq / n)
-  for (let i = 0; i < n; i++) d[i] /= -sigmaD
-
-  const [hx, hy] = gradients(h, size)
-  return {
-    texture: createNoiseTexture(device, size, h, d, hx, hy),
-    size,
-    wavesPerTile: wavesPerTile(h, hx, size),
-    dispGradPerTexel: -1 / sigmaD,
-    channels: { height: h, disp: d },
-  }
+  return { h, d, sigmaD: Math.sqrt(dSq / n) }
 }
 
 // Isotropic band-passed noise for capillary ripples (normal perturbation only).
@@ -261,19 +293,20 @@ function smoothAxisYInPlace(data, size, sigma) {
   }
 }
 
-// DFT of the circular combo kernel: real (the kernel is symmetric), one
-// value per frequency index
-function comboTransfer(size, sigma) {
-  const line = new Float32Array(size)
-  const out = new Float32Array(size)
-  const tmp = new Float32Array(size)
-  line[0] = 1
-  comboSmoothLine(line, out, sigma, tmp)
-  const re = new Float64Array(size)
-  const im = new Float64Array(size)
-  re.set(out)
-  fft1d(re, im, false)
-  return re
+// Analytic DTFT of the (infinite two-sided) combo kernel at frequency w;
+// the circular kernel differs by the wrapped tail, negligible for sigma << size
+function comboTransferAt(sigma, w) {
+  const a = Math.exp(-1 / sigma)
+  const cw = Math.cos(w)
+  let num = 0
+  let gain = 0
+  const coeffs = [5, -4, 1]
+  for (let k = 0; k < 3; k++) {
+    const d = a ** (k + 1)
+    num += coeffs[k] * (1 - d * d) / (1 - 2 * d * cw + d * d)
+    gain += coeffs[k] * (1 + d) / (1 - d)
+  }
+  return num / gain
 }
 
 function fft1d(re, im, inverse) {
