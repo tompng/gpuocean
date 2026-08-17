@@ -28,6 +28,13 @@ function sunDirection(timeOfDay, latitude, azimuth) {
   return [ground * Math.sin(bearing), Math.sin(elevation), ground * Math.cos(bearing)]
 }
 
+// Full-moon geometry: the moon rides the sun's path half a day out of phase and
+// on the opposite bearing, so it rises as the sun sets and is highest at
+// midnight. Enough to key a night scene without a full lunar ephemeris.
+function moonDirection(timeOfDay, latitude, azimuth) {
+  return sunDirection(timeOfDay + 12, latitude, azimuth + 180)
+}
+
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
   const [waveFieldCode, waveCommonCode, oceanCode, atmosphereCode, skyCode, foamCode, filmFoamCode] = await Promise.all(
@@ -142,6 +149,7 @@ async function main() {
       sampleWaveLevel(x, z, noise, waveField, ocean.layerCache),
       camera.target[0], camera.target[2])
     const sunDir = sunDirection(params.timeOfDay, params.latitude, params.azimuth)
+    const moonDir = moonDirection(params.timeOfDay, params.latitude, params.azimuth)
     camera.update(dt)
     const eye = camera.eye
     // Which side of the surface the camera is on, in meters. The waterline
@@ -155,7 +163,7 @@ async function main() {
     const lensR = 0.02 + params.waterlineThickness * 0.5
     const { lodScale, maxLayers } = QUALITY[params.quality]
     // Exactly once per frame: this advances the wave phases
-    ocean.update(waveDt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale, maxLayers)
+    ocean.update(waveDt, params, noise, capNoise, viewProj, eye, sunDir, moonDir, camDepth, lodScale, maxLayers)
 
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
@@ -202,7 +210,7 @@ async function main() {
         depthClearValue: 1,
       },
     })
-    sky.render(pass, invert(viewProj), eye, sunDir, camDepth, lensR, params.uwTurbidity, params.chlorophyll, params)
+    sky.render(pass, invert(viewProj), eye, sunDir, moonDir, camDepth, lensR, params.uwTurbidity, params.chlorophyll, params)
     ocean.draw(pass, params, foam.index, filmFoam.index)
     pass.end()
     device.queue.submit([encoder.finish()])

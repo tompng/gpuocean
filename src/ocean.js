@@ -37,7 +37,7 @@ const RIBBON_CELLS = 140
 const FOAM_RISE = 0.08
 // Uniforms struct size in floats; must stay a multiple of 4 (16-byte struct
 // alignment) and match the tail of Uniforms in wave_common.wgsl
-const UNIFORM_FLOATS = 200
+const UNIFORM_FLOATS = 204
 // Linear radiance, so the surface can attenuate before its own tonemap
 const REFRACT_FORMAT = 'rgba16float'
 // Which foam plate the shader samples; blend runs the coverage ramp
@@ -222,7 +222,7 @@ export class Ocean {
   // Advances time and writes the uniform. Must run exactly once per frame,
   // before any pass, or the wave phases integrate twice and the ocean runs at
   // double speed.
-  update(dt, params, noise, capNoise, viewProj, eye, sunDir, camDepth, lodScale, maxLayers) {
+  update(dt, params, noise, capNoise, viewProj, eye, sunDir, moonDir, camDepth, lodScale, maxLayers) {
     const u = this.uniformData
     u.set(viewProj, 0)
     this.time += dt
@@ -363,6 +363,7 @@ export class Ocean {
     u[197] = this.cell
     u[198] = this.linearCells * this.cell
     u[199] = PLATE_SEL[params.plate] ?? -1
+    u[201] = moonDir[0]; u[202] = moonDir[1]; u[203] = moonDir[2]
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength

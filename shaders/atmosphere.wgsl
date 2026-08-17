@@ -33,6 +33,15 @@ const SUN_COS_INNER: f32 = 0.99999123;
 // white at every elevation; 6.0 keeps noon white and sunset orange
 const SUN_DISC_PEAK: f32 = 6.0;
 const NIGHT_SKY: vec3f = vec3f(0.006, 0.009, 0.018);
+// Moonlight is scattered sunlight, reddened once by the lunar surface and then
+// perceived through scotopic vision, which reads it as cool. The moon's angular
+// radius (0.259 deg) is within a hair of the sun's, so it reuses the disc
+// cosines above.
+const MOON_TINT: vec3f = vec3f(0.62, 0.74, 1.0);
+const MOON_DISC: f32 = 1.5;
+// Physically moonlight is ~1e-6 of daylight; the eye dark-adapts, so it is
+// rendered as a dim cool key rather than as darkness
+const MOON_LEVEL: f32 = 0.13;
 
 // Everything depending on the sun and turbidity but not the view ray.
 // skyColor() runs up to three times per ocean fragment (reflection, Snell's
@@ -49,6 +58,11 @@ struct SkyState {
   rayleigh: f32,
   intensity: f32,
   day: f32,
+  moonDir: vec3f,
+  // 1 - day: how far the sun is past setting
+  nightMix: f32,
+  // how much the moon is actually up to light anything
+  moonLit: f32,
 }
 
 // F(theta, gamma) = (1 + A e^(B/cos theta)) (1 + C e^(D gamma) + E cos^2 gamma)
@@ -60,7 +74,7 @@ fn perez(A: vec3f, B: vec3f, C: vec3f, D: vec3f, E: vec3f, cosTheta: f32, gamma:
   return (vec3f(1.0) + A * exp(B / ct)) * (vec3f(1.0) + C * exp(D * gamma) + E * (cg * cg));
 }
 
-fn skyState(sunDir: vec3f, turbidity: f32, rayleigh: f32, intensity: f32) -> SkyState {
+fn skyState(sunDir: vec3f, moonDir: vec3f, turbidity: f32, rayleigh: f32, intensity: f32) -> SkyState {
   var s: SkyState;
   let sd = normalize(sunDir);
   s.sunDir = sd;
@@ -102,6 +116,9 @@ fn skyState(sunDir: vec3f, turbidity: f32, rayleigh: f32, intensity: f32) -> Sky
   s.sunTrans = exp(-(TAU_RAYLEIGH + max(0.04608 * T - 0.04586, 0.0) * TAU_AEROSOL_BASIS) * m);
   // The analytic model has nothing to say once the sun is down
   s.day = smoothstep(-0.25, 0.0, sd.y);
+  s.nightMix = 1.0 - s.day;
+  s.moonDir = normalize(moonDir);
+  s.moonLit = smoothstep(-0.06, 0.22, s.moonDir.y);
   return s;
 }
 
@@ -132,7 +149,12 @@ fn skyColor(dir: vec3f, s: SkyState) -> vec3f {
   let lum = dot(rgb, vec3f(0.2126, 0.7152, 0.0722));
   let lo = min(min(rgb.r, rgb.g), rgb.b);
   if (lo < 0.0 && lum > 0.0) { rgb = mix(vec3f(lum), rgb, lum / (lum - lo)); }
-  rgb = mix(NIGHT_SKY, max(rgb, vec3f(0.0)), s.day);
+  rgb = mix(NIGHT_SKY * (1.0 + 2.6 * s.moonLit), max(rgb, vec3f(0.0)), s.day);
+  // Moon disc and halo, gated to the night side and to above the horizon
+  let cosM = dot(d, s.moonDir);
+  rgb += MOON_TINT * (s.nightMix * s.moonLit * smoothstep(-0.004, 0.004, d.y)
+       * (MOON_DISC * smoothstep(SUN_COS_OUTER, SUN_COS_INNER, cosM)
+        + 0.05 * pow(max(cosM, 0.0), 110.0)));
 
   // Perez carries the aureole but not the disc, and the disc is what the
   // specular highlight and Snell's window need to see
@@ -145,7 +167,14 @@ fn skyColor(dir: vec3f, s: SkyState) -> vec3f {
 
 // Hue of the direct beam. tau is monotonic in wavelength so red is always the
 // largest channel; dividing by it leaves a pure tint with max component 1.
-fn sunTint(s: SkyState) -> vec3f { return s.sunTrans / max(s.sunTrans.r, 1e-4); }
+// Hue of whatever is lighting the water. Dividing the solar beam by its own red
+// leaves a tint with max component 1, but once the sun is down every channel
+// has underflowed and that ratio blows up to pure red — hence the clamp, and
+// the handover to the moon.
+fn sunTint(s: SkyState) -> vec3f {
+  let solar = clamp(s.sunTrans / max(s.sunTrans.r, 1e-4), vec3f(0.0), vec3f(1.0));
+  return mix(solar, MOON_TINT, s.nightMix);
+}
 
 // How low and reddened the sun is, 0..1 — now driven by air mass rather than a
 // raw sin(elevation) ramp
@@ -154,7 +183,10 @@ fn sunWarmth(s: SkyState) -> f32 { return smoothstep(1.6, 8.0, s.airMass); }
 // Direct sunlight reaching the water. 0.72 is the beam luminance with the sun
 // high, so this saturates above roughly 55 degrees.
 fn sunLevel(s: SkyState) -> f32 {
-  return mix(0.10, 1.0, clamp(dot(s.sunTrans, vec3f(0.2126, 0.7152, 0.0722)) / 0.72, 0.0, 1.0)) * s.intensity;
+  let solar = mix(0.10, 1.0, clamp(dot(s.sunTrans, vec3f(0.2126, 0.7152, 0.0722)) / 0.72, 0.0, 1.0));
+  // With the moon down there is nothing to key off, so the night goes properly
+  // dark instead of resting on the daylight floor
+  return mix(solar, MOON_LEVEL * s.moonLit, s.nightMix) * s.intensity;
 }
 
 // --- water volume -----------------------------------------------------------

@@ -464,11 +464,16 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let nTerr = normalize(vec3f(-hx / (2.0 * eT), 1.0, -hz / (2.0 * eT)));
   n = normalize(mix(nTerr, n, waterM));
   let v = normalize(u.cameraPos - in.world);
-  let SKY = skyState(u.sunDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
+  let SKY = skyState(u.sunDir, u.moonDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
   if (dot(n, v) < 0.0) { n = -n; }
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
   let r = reflect(-v, n);
-  let spec = sunTint(SKY) * (mix(8.0, 4.5, sunWarmth(SKY)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
+  // Two glitter paths rather than one blended direction: the sun and moon sit
+  // on opposite sides of the sky, so interpolating between them would sweep a
+  // highlight across the water at dusk that belongs to neither.
+  let specSun = mix(8.0, 4.5, sunWarmth(SKY)) * pow(max(dot(r, SKY.sunDir), 0.0), 600.0) * SKY.day;
+  let specMoon = 5.0 * pow(max(dot(r, SKY.moonDir), 0.0), 600.0) * SKY.nightMix * SKY.moonLit;
+  let spec = sunTint(SKY) * (specSun + specMoon);
   let fCenter = vec2f(u.foamCX, u.foamCZ);
   let fuv = (in.gridXZ - fCenter) / (2.0 * u.foamRegion) + 0.5;
   let edgeFade = 1.0 - smoothstep(0.85, 1.0, length(in.gridXZ - fCenter) / u.foamRegion);
@@ -691,7 +696,7 @@ fn vs_land(in: VSIn) -> VSOut {
 
 @fragment
 fn fs_land(in: VSOut) -> @location(0) vec4f {
-  let SKY = skyState(u.sunDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
+  let SKY = skyState(u.sunDir, u.moonDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
   let e = 0.5;
   let hx = terrainHeight(in.gridXZ + vec2f(e, 0.0)) - terrainHeight(in.gridXZ - vec2f(e, 0.0));
   let hz = terrainHeight(in.gridXZ + vec2f(0.0, e)) - terrainHeight(in.gridXZ - vec2f(0.0, e));

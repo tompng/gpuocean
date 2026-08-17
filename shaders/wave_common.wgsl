@@ -97,6 +97,8 @@ struct Uniforms {
   // procedural pattern the plates replaced
   plateSel: f32,
   qPad1: f32,
+  // vec3f aligns to 16 B, so it starts at float index 200
+  moonDir: vec3f,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

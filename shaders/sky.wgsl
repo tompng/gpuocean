@@ -10,9 +10,10 @@ struct Uniforms {
   chlorophyll: f32,
   skyTurbidity: f32,
   skyRayleigh: f32,
-  // struct ends at 116 B and rounds to 128, which is the buffer size in
-  // sky.js; a trailing vec3f pad would align to 128 and push it to 144
   skyIntensity: f32,
+  // vec3f aligns to 16 B, so this starts at 128 and the struct ends at 140,
+  // rounding to the 144 the buffer in sky.js is sized to
+  moonDir: vec3f,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -35,7 +36,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
 fn fs(in: VSOut) -> @location(0) vec4f {
   let far = u.invViewProj * vec4f(in.ndc, 1.0, 1.0);
   let dir = normalize(far.xyz / far.w - u.cameraPos);
-  let SKY = skyState(u.sunDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
+  let SKY = skyState(u.sunDir, u.moonDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
   var c = skyColor(dir, SKY);
   // Submerged there is no sky to see: this pass only fills what the surface
   // and floor meshes leave open, and what fills it is the murk, brightening
