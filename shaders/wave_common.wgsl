@@ -93,7 +93,9 @@ struct Uniforms {
   // must match the lattice the vertex buffer was built with
   warpCell: f32,
   warpLinear: f32,
-  qPad0: f32,
+  // <0 blends across the coverage ramp; 0/1/2 force one plate, 3 the
+  // procedural pattern the plates replaced
+  plateSel: f32,
   qPad1: f32,
 }
 

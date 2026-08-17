@@ -40,6 +40,8 @@ const FOAM_RISE = 0.08
 const UNIFORM_FLOATS = 200
 // Linear radiance, so the surface can attenuate before its own tonemap
 const REFRACT_FORMAT = 'rgba16float'
+// Which foam plate the shader samples; blend runs the coverage ramp
+const PLATE_SEL = { blend: -1, sparse: 0, mid: 1, dense: 2, procedural: 3 }
 
 export class Ocean {
   constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, format, opts = {}) {
@@ -360,6 +362,7 @@ export class Ocean {
     u[196] = params.intensity
     u[197] = this.cell
     u[198] = this.linearCells * this.cell
+    u[199] = PLATE_SEL[params.plate] ?? -1
     u[160] = Math.exp(-dt / 0.5)
     u[161] = Math.min(dt, 0.033)
     u[162] = 2 * Math.PI / params.wavelength

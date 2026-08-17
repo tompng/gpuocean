@@ -17,11 +17,16 @@
   #panel > summary { cursor: pointer; font-weight: 600; list-style: none; display: flex; gap: 8px; align-items: baseline; }
   #panel > summary::-webkit-details-marker { display: none; }
   #fps { margin-left: auto; font-variant-numeric: tabular-nums; opacity: 0.75; font-weight: 400; }
-  #panel section { margin-top: 10px; }
-  #panel section > h3 {
+  #panel .group { margin-top: 10px; }
+  #panel .group > summary {
+    cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px;
     margin: 0 0 2px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
     text-transform: uppercase; opacity: 0.5; border-bottom: 1px solid rgba(255,255,255,0.12); padding-bottom: 2px;
   }
+  #panel .group > summary::-webkit-details-marker { display: none; }
+  #panel .group > summary::before { content: '\25B8'; font-size: 9px; opacity: 0.8; }
+  #panel .group[open] > summary::before { content: '\25BE'; }
+  #panel .group > summary:hover { opacity: 0.85; }
   #panel label { display: grid; grid-template-columns: 96px 1fr 34px; gap: 8px; align-items: center; }
   #panel label > span { text-align: right; font-variant-numeric: tabular-nums; opacity: 0.8; }
   #panel input[type=range] { width: 100%; min-width: 0; }

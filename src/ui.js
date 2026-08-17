@@ -83,7 +83,8 @@ const SPEC = [
     ],
   },
   {
-    group: 'foam', items: [
+    group: 'foam', open: true, items: [
+      { id: 'plate', type: 'select', options: ['blend', 'sparse', 'mid', 'dense', 'procedural'], value: 'blend' },
       { id: 'foam', min: 0, max: 1, step: 0.02, value: 0.6 },
       { id: 'foamLife', min: 0.5, max: 12, step: 0.5, value: 4 },
       { id: 'shoreWidth', min: 0.2, max: 4, step: 0.05, value: 1 },
@@ -138,18 +139,30 @@ const PRESETS = {
   },
 }
 
+const PANEL_KEY = 'gpuocean.panel'
+
 export function setupUI() {
   const params = {}
   const inputs = {}
   const root = document.getElementById('controls')
 
+  // Collapsed state persists: with this many controls, re-opening the sections
+  // you were working in after every reload is the annoying part
+  let openState = {}
+  try { openState = JSON.parse(localStorage.getItem(PANEL_KEY) ?? '{}') } catch {}
+
   for (const { group, items, open } of SPEC) {
-    const section = document.createElement('section')
-    const heading = document.createElement('h3')
-    heading.textContent = group
-    section.appendChild(heading)
+    const section = document.createElement('details')
+    section.className = 'group'
+    section.open = openState[group] ?? open ?? false
+    const summary = document.createElement('summary')
+    summary.textContent = group
+    section.appendChild(summary)
     for (const item of items) section.appendChild(buildControl(item, params, inputs))
-    section.hidden = open === undefined ? false : !open
+    section.addEventListener('toggle', () => {
+      openState[group] = section.open
+      try { localStorage.setItem(PANEL_KEY, JSON.stringify(openState)) } catch {}
+    })
     root.appendChild(section)
   }
 

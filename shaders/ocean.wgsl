@@ -101,6 +101,19 @@ fn foamPlate(xz: vec2f, flow: vec2f, cover: f32, lod: f32) -> f32 {
   // The raft on a fresh crest is the part that visibly churns, so it drifts
   // faster; 2.2 keeps it inherently finer than the lace
   let dense = textureSampleLevel(foamPlates, samp, (xz + flow * (drift * 1.7)) * (s * 2.2 / u.crestScale), 2, lod).r;
+  // plateSel < 0 is the coverage blend. Otherwise a single plate is forced, so
+  // each can be inspected on its own; the erosion threshold still follows
+  // coverage, so a forced plate is shown eroded exactly as it would be in the
+  // blend. The branch is on a uniform, and the samples are already taken above,
+  // so no texture call sits in non-uniform control flow.
+  if (u.plateSel >= 0.0) {
+    let sel = i32(u.plateSel + 0.5);
+    if (sel == 0) { return sparse; }
+    if (sel == 1) { return mid; }
+    if (sel == 2) { return dense; }
+    // the procedural pattern this replaced, kept for an A/B against the plates
+    return textureSampleLevel(foamPatTex, samp, xz * s, lod).r;
+  }
   return mix(mix(sparse, mid, smoothstep(u.laceLow, u.laceHigh, cover)),
              dense, smoothstep(u.crestStart, u.crestFull, cover));
 }
