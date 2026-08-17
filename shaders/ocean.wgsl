@@ -131,10 +131,13 @@ fn warpCellAt(dist: f32) -> f32 {
   return WARP_CELL + max((WARP_GROWTH - 1.0) * (dist - WARP_LINEAR), 0.0);
 }
 
-// Open-ocean grid: pure scroll waves. Across the shore ribbon's seaward
-// band it dives below the sand and is cut just past the junction, so the
-// ribbon always covers it; at the band's seaward edge both meshes evaluate
-// the same surface, so the overlap seam has matching shape and color.
+// Open-ocean grid: pure scroll waves, ending at the handover band's
+// seaward edge under the shore ribbon's margin and skirt rows. In the
+// overlap both meshes tessellate the same surface with different vertex
+// phases, so they interleave within their interpolation error and either
+// may win locally — never a fixed sink, which used to shear through wave
+// fronts as a visible wall. Any see-through sliver is backed by the
+// ribbon's folded-down skirt.
 @vertex
 fn vs_grid(in: VSIn) -> VSOut {
   let wv = warpVertex(in.pos);
@@ -142,32 +145,18 @@ fn vs_grid(in: VSIn) -> VSOut {
   let w = sampleWaves(xz, wv.z);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
-  // The cut keys on the DISPLACED position: a vertex materially seaward
-  // of the band can displace landward past the film's junction and poke
-  // out of the ribbon's cover, so it is judged by where it lands — the
-  // extra discards open no gap, the ribbon's wave side and film span
-  // everything landward of the junction continuously. The dive-under
-  // stays on the MATERIAL position: the landed field folds along steep
-  // displacement gradients, and a sink keyed on it opens pit walls along
-  // wave fronts outside the ribbon's cover.
+  // The cut keys on the MATERIAL position: the ribbon's seaward edge is a
+  // material curve carried by the same displacement field, so a material
+  // cut moves with it and the overlap width stays constant. Judging by the
+  // displaced position would pin the cut in world space and open a gap
+  // whenever the displacement swings both surfaces seaward.
   let sOff = coastSDF(xz);
-  let sOffD = coastSDF(dispXZ);
   let sJ0 = -REST_DEPTH / u.slope;
-  // Full height like the ribbon's wave side, so the two surfaces agree at
-  // the overlap band's seaward edge; inside the band the dive-under ramp
-  // keeps the grid below the ribbon's blend toward the film
-  var y = softClamp(w.height, ty);
-  // The dive-under ramp is LINEAR: a smoothstep starts flat, leaving the
-  // grid coincident with the ribbon deep into the band, where differing
-  // tessellations let coarse grid cells poke through as shading stripes.
-  // It fades out as cells outgrow the band: a coarse cell straddling the
-  // ramp would open a visible pit, and far away the attenuated waves leave
-  // the grid nearly coplanar with the ribbon anyway.
-  y -= 1.5 * clamp((sOff - (sJ0 - SIM_BAND)) / SIM_BAND, 0.0, 1.0) * (1.0 - smoothstep(1.0, 3.0, wv.z));
+  let y = softClamp(w.height, ty);
   var out: VSOut;
   out.world = vec3f(dispXZ.x, y, dispXZ.y);
   out.gridXZ = xz;
-  out.cut = sOffD - sJ0;
+  out.cut = sOff - (sJ0 - SIM_BAND);
   out.st = vec2f(-1000.0, 0.0);
   out.waveXZ = xz;
   out.stretch = 1.0;
