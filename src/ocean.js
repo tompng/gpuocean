@@ -238,6 +238,7 @@ export class Ocean {
     u[155] = Math.exp(-dt / params.foamLife)
     u[156] = Math.exp(-dt / (params.foamLife * 0.25))
     u[157] = Math.exp(-dt / FOAM_RISE)
+    u[158] = params.foamLife
     u[159] = SLOPE
     // world foam window follows the camera, snapped to buffer texels so the
     // carried-over content resamples exactly; frozen while paused so the

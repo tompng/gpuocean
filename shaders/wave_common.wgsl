@@ -40,7 +40,7 @@ struct Uniforms {
   foamDecay: f32,
   foamDecayG: f32,
   foamRise: f32,
-  padB: f32,
+  foamLife: f32,
   slope: f32,
   foamDecaySwallow: f32,
   simDt: f32,

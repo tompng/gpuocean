@@ -282,9 +282,23 @@ fn vs_island(in: VSIn) -> VSOut {
   return ribbonVertex(b, col, c.xy, normalize(c.zw), in.cell);
 }
 
-fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -> vec3f {
+struct NormalSample {
+  n: vec3f,
+  // horizontal displacement Jacobian — the generator's breaking measure,
+  // band-attenuated exactly like the rendered waves
+  jac: f32,
+  // standard deviation of jac - 1, summed in closed form over the layers
+  // (the noise height channel has unit variance): with the rendered
+  // attenuation, and without it (the physical value)
+  sigma: f32,
+  sigmaP: f32,
+}
+
+fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -> NormalSample {
   var dPx = vec3f(1.0, 0.0, 0.0);
   var dPz = vec3f(0.0, 0.0, 1.0);
+  var varC = 0.0;
+  var varP = 0.0;
   // per-pixel sampling footprint in meters; the same band-limited-noise
   // argument as the vertex shader replaces mip filtering with a smooth
   // per-layer attenuation (texels per pixel against the band's wavelength)
@@ -302,10 +316,17 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
     let dDdu = u.choppiness * amp * s.x * u.dGrad;
     dPx += vec3f(dir.x * dDdu * duvdx.x, amp * dot(grad, duvdx), dir.y * dDdu * duvdx.x);
     dPz += vec3f(dir.x * dDdu * duvdz.x, amp * dot(grad, duvdz), dir.y * dDdu * duvdz.x);
+    let cAmp = u.choppiness * amp * u.dGrad * invL;
+    let cAmpP = u.choppiness * l.dirScaleAmp.w * u.dGrad * invL;
+    varC += cAmp * cAmp;
+    varP += cAmpP * cAmpP;
   }
   let leanSlope = (eta * eta + 2.0 * eta) / ((1.0 + eta) * (1.0 + eta));
   dPx += vec3f(u.leanX * leanSlope * dPx.y, 0.0, u.leanY * leanSlope * dPx.y);
   dPz += vec3f(u.leanX * leanSlope * dPz.y, 0.0, u.leanY * leanSlope * dPz.y);
+  let jac = dPx.x * dPz.z - dPz.x * dPx.z;
+  let sigma = sqrt(varC);
+  let sigmaP = sqrt(varP);
   // Ripples concentrate where the long waves strain the surface: orbital
   // convergence (compression, near crests) with the peak shifted toward the
   // front face. Layers 0-2 are isotropic wind ripples (weak bias); layers 3-5
@@ -334,8 +355,14 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
     dPx.y += dot(grad, vec2f(dir.x, -dir.y) * invL);
     dPz.y += dot(grad, vec2f(dir.y, dir.x) * invL);
   }
-  return normalize(cross(dPz, dPx));
+  return NormalSample(normalize(cross(dPz, dPx)), jac, sigma, sigmaP);
 }
+
+// far-foam calibration: extra crest passages counted per foam lifetime,
+// and the softness of the quantile cut in sigma units (stands in for the
+// decayed brightness spread of real wakes)
+const SWEEP_K: f32 = 1.2;
+const FAR_SOFT: f32 = 0.8;
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
@@ -352,7 +379,8 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // material sampling would compress them onto the wedge with a step at
   // the junction — so they survive onto the film without artifacts
   let rippleXZ = mix(in.gridXZ, in.world.xz, sbF);
-  var n = surfaceNormal(in.waveXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), 1.0 - sbF);
+  let ns = surfaceNormal(in.waveXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), 1.0 - sbF);
+  var n = ns.n;
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
   // which otherwise keeps fresnel and ripple glints alive landward of the film
@@ -375,7 +403,29 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let fCenter = vec2f(u.foamCX, u.foamCZ);
   let fuv = (in.gridXZ - fCenter) / (2.0 * u.foamRegion) + 0.5;
   let edgeFade = 1.0 - smoothstep(0.85, 1.0, length(in.gridXZ - fCenter) / u.foamRegion);
-  let foamAcc = textureSample(foamTex, samp, fuv).rgb * edgeFade;
+  let foamRaw = textureSample(foamTex, samp, fuv).rgb;
+  let foamAcc = foamRaw * edgeFade;
+  // Beyond the window the buffer fades out; an instantaneous stand-in from
+  // the actual wave field keeps whitecaps alive at any distance. Its
+  // coverage is matched to the buffer's steady state analytically instead
+  // of by eye: jac - 1 is ~Gaussian, so the probability of crossing the
+  // generator's threshold follows from sigmaP, the number of independent
+  // crest passages within the foam lifetime amplifies it into the swept
+  // coverage, and the current field is then cut at its own quantile of
+  // that coverage — the area matches by construction, placed on the most
+  // compressed spots. The quantile is taken in the rendered field's sigma,
+  // so band attenuation moves the cut instead of thinning distant foam.
+  let sigmaR = max(ns.sigma, 1e-4);
+  let pGen = 1.0 / (1.0 + exp(-1.702 * (u.foamThreshold - 1.0) / max(ns.sigmaP, 1e-4)));
+  let period = 6.2832 / sqrt(9.81 * u.waveK);
+  let cover = clamp(1.0 - pow(1.0 - pGen, 1.0 + SWEEP_K * u.foamLife / period), 1e-4, 0.6);
+  let zQ = -log(1.0 / cover - 1.0) / 1.702;
+  let zNow = (ns.jac - 1.0) / sigmaR;
+  let waterGateF = smoothstep(0.0, 0.3, in.world.y - ty);
+  let depthF = max(-ty, 0.05);
+  let genSurfF = smoothstep(0.55, 0.9, in.world.y / depthF) * smoothstep(0.0, 0.5, depthF) * waterGateF;
+  let farR = max(smoothstep(zQ, zQ - FAR_SOFT, zNow) * waterGateF, genSurfF);
+  let accR = mix(farR, foamRaw.r, edgeFade);
   // Bubble clouds scatter multiply and emerge nearly isotropic (white water);
   // a mild forward lobe remains for thin backlit crests. The film is a sheet
   // too thin to hold a submerged bubble cloud, so the glow fades out there
@@ -436,7 +486,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let patFine = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 3.0, patFilmUV.y)).r;
   let patCoarse = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 9.0, patFilmUV.y)).r;
   let patFilm = mix(patFine, patCoarse, 1.0 - smoothstep(0.07, 0.4, in.stretch));
-  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * foamAcc.r));
+  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR));
   let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * (filmAcc.b + filmAcc.r * 0.8)));
   // the masks are thresholded 0/1 fields, so foam is present when either
   // system says so — a blend would half-fade both across the handover
