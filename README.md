@@ -7,6 +7,7 @@ WebGPU ocean waves using scrolling noise textures (an FFT-ocean approximation).
 Serve statically (WebGPU requires a secure context, and shaders are fetched):
 
 ```sh
+ruby -run -e httpd . -p 8000
 python3 -m http.server 8000
 # open http://localhost:8000
 ```
