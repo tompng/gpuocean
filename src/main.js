@@ -58,6 +58,7 @@ async function main() {
   const params = setupUI()
   const reportFPS = setupFPS()
   camera.floor = (x, z) => terrainHeightAt(x, z, params.depth)
+  window.camera = camera // TEMP DEBUG
   setupNoiseDebug([
     ...noise.variants.map(v => ({ name: v.name, size: noise.size, channels: v.channels })),
     { name: 'capillary', size: capNoise.size, channels: capNoise.channels },

@@ -89,11 +89,14 @@ fn foamPlate(xz: vec2f, flow: vec2f, cover: f32) -> f32 {
   // Sparse never drifts: it is the stranded residue at the high-water mark and
   // has to stay locked to the water it was deposited on
   let sparse = textureSample(foamPlates, samp, xz * s, 0).r;
-  // Mid shears along the flow. The shear is area-preserving (stretch along by
-  // k, squeeze across by k), so streaks lengthen without thinning.
-  let k = 1.0 + 3.0 * u.streaks;
+  // Mid stretches ALONG the flow only. Stretching along by k while also
+  // squeezing across by k is area-preserving but distorts every feature by k^2
+  // — at k = 2.5 a round bubble becomes a 6:1 smear, and since this plate
+  // already carries flow streaks photographically it double-counts them.
+  // Elongating one axis keeps the cross-flow scale honest.
+  let k = 1.0 + 2.0 * u.streaks;
   let along = dot(xz, flow) / k + drift;
-  let across = dot(xz, vec2f(-flow.y, flow.x)) * k;
+  let across = dot(xz, vec2f(-flow.y, flow.x));
   let mid = textureSample(foamPlates, samp, vec2f(along, across) * s, 1).r;
   // The raft on a fresh crest is the part that visibly churns, so it drifts
   // faster; 2.2 keeps it inherently finer than the lace
@@ -595,7 +598,9 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Over-compressed foam filaments merge instead of thinning forever: as
   // the film compresses, coarsen in the cross-shore direction only, so the
   // rendered streaks stop shrinking. In the film frame flow is +band.
-  let bStretch = mix(3.0, 9.0, 1.0 - smoothstep(0.07, 0.4, in.stretch));
+  // Gentler than the procedural pattern needed — this is a photograph, and
+  // past about 4:1 the bubbles read as smear rather than as stretched foam.
+  let bStretch = mix(2.0, 4.0, 1.0 - smoothstep(0.07, 0.4, in.stretch));
   let filmCover = filmAcc.b + filmAcc.r * 0.8;
   let patFilm = foamPlate(vec2f(in.st.x / bStretch, colT(in.st.y)), vec2f(1.0, 0.0), filmCover);
   let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR));
@@ -606,7 +611,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the masks are thresholded 0/1 fields, so foam is present when either
   // system says so — a blend would half-fade both across the handover
   let foamMask = min(maskWave + maskFilm + rim, 1.0) * u.opacity;
-  let foamColor = lightTint * mix(0.45, 1.0, sunLev) * (0.72 + 0.22 * max(n.y, 0.0));
+  // The mask is a near-binary cut, so at full coverage the dense plate passes
+  // everywhere and the raft renders as flat white paint. Feed the plate's own
+  // density back in as shading so its bubble structure survives where the
+  // threshold has stopped discriminating.
+  let patLit = max(patWave * maskWave, patFilm * maskFilm);
+  let foamColor = lightTint * mix(0.45, 1.0, sunLev) * (0.72 + 0.22 * max(n.y, 0.0))
+                * (0.60 + 0.55 * patLit);
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);
   let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), SKY), fog);
