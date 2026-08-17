@@ -310,7 +310,19 @@ fn cl_density(pos: vec3f, foot: f32) -> f32 {
   let base = cl_fbm(q / s, foot / s, CL_OCTAVES);
   // Coverage is a threshold on the field, softened by `softness`. Towers thin
   // upward unless anvil spreads them back out.
-  let cover = clamp(cld.coverage * (1.0 - 0.45 * hN * (1.0 - cld.anvil)), 0.0, 1.0);
+  // Real skies are organised at scales far larger than one cloud: masses and
+  // clear lanes tens of kilometres across. The fBm above starts at `scale` and
+  // only goes FINER, so without this the deck is a uniform field of same-sized
+  // puffs. Overhead that reads fine, because only a few are in view; toward the
+  // horizon, where hundreds sit in a row at a near-constant angular size, it
+  // reads unmistakably as a repeating texture. Modulating coverage at 9x the
+  // feature scale restores the big masses and clear lanes that break the row.
+  // Two octaves, and its footprint is 9x smaller in units of its own scale, so
+  // it stays resolved out to the horizon where the base field has faded.
+  let macroS = s * 9.0;
+  let macroN = cl_fbm(q / macroS, foot / macroS, 2).x;
+  let cover = clamp(cld.coverage * mix(0.5, 1.45, macroN)
+                    * (1.0 - 0.45 * hN * (1.0 - cld.anvil)), 0.0, 1.0);
   var d = cl_remap(base.x, 1.0 - cover, 1.0 - cover + max(cld.softness, 0.02));
   // Where the field is unresolved — the horizon band, and every ray the ocean
   // sends in with a widened footprint — there is no detail left to threshold,
@@ -460,7 +472,16 @@ fn cloudLayer(dir: vec3f, s: SkyState, spread: f32) -> CloudHit {
     // from the arc by 0.2% at that range.
     let alt = sqrt(r0 * r0 + 2.0 * t * r0 * dy + t * t) - CL_EARTH_R;
     let p = cld.camPos + dc * t;
-    let foot = t * cld.pixelAngle * spread;
+    // ANISOTROPIC. t * pixelAngle is the footprint ACROSS the view direction;
+    // along it, a grazing ray smears the same pixel over 1/|dy| as much deck —
+    // 100x at a degree above the horizon. Filtering isotropically at the
+    // smaller extent under-filters that axis, and the far field aliases into
+    // fine horizontal striations. Taking the larger extent is what a mip chain
+    // does with a max-extent LOD: it over-blurs across, which is invisible,
+    // and it is what lets the horizon band converge on the deck's mean instead
+    // of resolving detail it cannot hold.
+    let graze = 1.0 / max(abs(dy), 0.02);
+    let foot = t * cld.pixelAngle * spread * min(graze, 60.0);
     let dens = cl_density(vec3f(p.x, alt, p.z), foot);
     if (dens > 1e-5) {
       let hN = clamp((alt - cld.altitude) / max(cld.thickness, 1.0), 0.0, 1.0);
