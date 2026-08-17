@@ -6,6 +6,11 @@ import { floatToHalf } from './gpu.js'
 // so G is the NEGATED x-cumsum of height (positive cumsum would sharpen troughs, not crests).
 // Height is band-passed along x: the cumsum has 1/k gain, so without a band-pass
 // tile-sized components would dominate the displacement channel.
+// Built in the frequency domain: the circular combo smoothing is
+// multiplication by the DFT of its impulse response, the band-pass is the
+// transfer difference, per-row mean removal is the kx = 0 plane, and the
+// displacement cumsum is division by 1 - e^{-iω} — each the exact spectral
+// counterpart of the equivalent spatial operation.
 export function generateGravityNoiseTexture(device, opts = {}) {
   const size = opts.size ?? 512
   const sigmaAlong = opts.sigmaAlong ?? 3
@@ -14,29 +19,47 @@ export function generateGravityNoiseTexture(device, opts = {}) {
   const random = mulberry32(opts.seed ?? 12345)
 
   const n = size * size
+  const re = new Float64Array(n)
+  const im = new Float64Array(n)
   const noise = randomArray(random, n)
-  const h = smoothAxisX(noise, size, sigmaAlong)
-  const wide = smoothAxisX(noise, size, sigmaAlongWide)
-  for (let i = 0; i < n; i++) h[i] -= wide[i]
-  smoothAxisYInPlace(h, size, sigmaCross)
-  normalizeVariance(h)
+  re.set(noise)
+  fft2d(re, im, size, false)
 
-  const d = new Float32Array(n)
-  for (let y = 0; y < size; y++) {
-    const row = y * size
-    let mean = 0
-    for (let x = 0; x < size; x++) mean += h[row + x]
-    mean /= size
-    let c = 0
-    for (let x = 0; x < size; x++) {
-      h[row + x] -= mean
-      c += h[row + x]
-      d[row + x] = c
+  const tAlong = comboTransfer(size, sigmaAlong)
+  const tWide = comboTransfer(size, sigmaAlongWide)
+  const tCross = comboTransfer(size, sigmaCross)
+  const dRe = new Float64Array(n)
+  const dIm = new Float64Array(n)
+  for (let ky = 0; ky < size; ky++) {
+    for (let kx = 0; kx < size; kx++) {
+      const i = ky * size + kx
+      const g = kx === 0 ? 0 : (tAlong[kx] - tWide[kx]) * tCross[ky]
+      const hr = re[i] * g
+      const hi = im[i] * g
+      re[i] = hr
+      im[i] = hi
+      if (kx !== 0) {
+        const w = 2 * Math.PI * kx / size
+        const ar = 1 - Math.cos(w)
+        const ai = Math.sin(w)
+        const m = ar * ar + ai * ai
+        dRe[i] = (hr * ar + hi * ai) / m
+        dIm[i] = (hi * ar - hr * ai) / m
+      }
     }
-    let dMean = 0
-    for (let x = 0; x < size; x++) dMean += d[row + x]
-    dMean /= size
-    for (let x = 0; x < size; x++) d[row + x] -= dMean
+  }
+  fft2d(re, im, size, true)
+  fft2d(dRe, dIm, size, true)
+
+  const h = new Float32Array(n)
+  for (let i = 0; i < n; i++) h[i] = re[i]
+  let hSq = 0
+  for (let i = 0; i < n; i++) hSq += h[i] * h[i]
+  const sigmaH = Math.sqrt(hSq / n)
+  const d = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    h[i] /= sigmaH
+    d[i] = dRe[i] / sigmaH
   }
   let dSq = 0
   for (let i = 0; i < n; i++) dSq += d[i] * d[i]
@@ -235,6 +258,86 @@ function smoothAxisYInPlace(data, size, sigma) {
     for (let y = 0; y < size; y++) line[y] = data[y * size + x]
     comboSmoothLine(line, out, sigma, tmp)
     for (let y = 0; y < size; y++) data[y * size + x] = out[y]
+  }
+}
+
+// DFT of the circular combo kernel: real (the kernel is symmetric), one
+// value per frequency index
+function comboTransfer(size, sigma) {
+  const line = new Float32Array(size)
+  const out = new Float32Array(size)
+  const tmp = new Float32Array(size)
+  line[0] = 1
+  comboSmoothLine(line, out, sigma, tmp)
+  const re = new Float64Array(size)
+  const im = new Float64Array(size)
+  re.set(out)
+  fft1d(re, im, false)
+  return re
+}
+
+function fft1d(re, im, inverse) {
+  const n = re.length
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1
+    for (; j & bit; bit >>= 1) j ^= bit
+    j ^= bit
+    if (i < j) {
+      let t = re[i]; re[i] = re[j]; re[j] = t
+      t = im[i]; im[i] = im[j]; im[j] = t
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (inverse ? 2 : -2) * Math.PI / len
+    const wr = Math.cos(ang)
+    const wi = Math.sin(ang)
+    for (let i = 0; i < n; i += len) {
+      let cr = 1
+      let ci = 0
+      for (let j = 0; j < len >> 1; j++) {
+        const a = i + j
+        const b = a + (len >> 1)
+        const tr = re[b] * cr - im[b] * ci
+        const ti = re[b] * ci + im[b] * cr
+        re[b] = re[a] - tr
+        im[b] = im[a] - ti
+        re[a] += tr
+        im[a] += ti
+        const t = cr * wr - ci * wi
+        ci = cr * wi + ci * wr
+        cr = t
+      }
+    }
+  }
+  if (inverse) {
+    for (let i = 0; i < n; i++) {
+      re[i] /= n
+      im[i] /= n
+    }
+  }
+}
+
+function fft2d(re, im, size, inverse) {
+  const lr = new Float64Array(size)
+  const li = new Float64Array(size)
+  for (let y = 0; y < size; y++) {
+    const off = y * size
+    lr.set(re.subarray(off, off + size))
+    li.set(im.subarray(off, off + size))
+    fft1d(lr, li, inverse)
+    re.set(lr, off)
+    im.set(li, off)
+  }
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size; y++) {
+      lr[y] = re[y * size + x]
+      li[y] = im[y * size + x]
+    }
+    fft1d(lr, li, inverse)
+    for (let y = 0; y < size; y++) {
+      re[y * size + x] = lr[y]
+      im[y * size + x] = li[y]
+    }
   }
 }
 
