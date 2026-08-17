@@ -54,6 +54,43 @@ function moonDirection(timeOfDay, latitude, azimuth) {
   return sunDirection(timeOfDay + 12, latitude, azimuth + 180)
 }
 
+// Boulder field on the bed, seated against the SAME baked SDF the shader's
+// terrainHeight() samples — coast.sdfAt mirrors coastSDF + terrainHeight and is
+// already what camera.floor uses — so a rock never floats above the sand or
+// sinks into it, and its contact shadow therefore starts exactly at the sand.
+function placeBodies(coast, depth) {
+  const terr = (x, z) => Math.min(Math.max(SLOPE * coast.sdfAt(x, z), -depth), 3)
+  // x, z, then the three semi-axes
+  const spec = [
+    [-14, 34, 1.9, 1.15, 1.6],
+    [-26, 22, 1.2, 0.80, 1.4],
+    [-33, 41, 2.6, 1.50, 2.2],
+    [-9, 12, 0.9, 0.70, 1.1],
+    [-52, -26, 3.1, 1.90, 2.7],
+    [-21, -8, 1.5, 1.00, 1.7],
+  ]
+  const out = []
+  for (const [x0, z, rx, ry, rz] of spec) {
+    // The coastline is authored data and can be re-authored, and it already has
+    // an island and a cape where these coordinates would otherwise land dry, so
+    // a spot is SEARCHED for rather than trusted: walk seaward until the bed is
+    // deep enough to cover the rock. Nothing here hardcodes the coast's shape.
+    let x = null
+    for (let probe = x0; probe > x0 - 120; probe -= 2) {
+      if (terr(probe, z) <= -(ry * 1.9 + 0.5)) { x = probe; break }
+    }
+    if (x === null) continue
+    out.push({
+      // 35% buried: a ball resting tangentially on the sand reads as floating,
+      // because its contact shadow is then a point
+      c: [x, terr(x, z) + ry * 0.65, z],
+      r: [rx, ry, rz],
+      opacity: 1,
+    })
+  }
+  return out
+}
+
 async function main() {
   const { device, context, format, timestamps } = await initWebGPU(canvas)
   const [waveFieldCode, waveCommonCode, oceanCode, atmosphereCode, skyCode, foamCode, filmFoamCode] = await Promise.all(
@@ -95,6 +132,9 @@ async function main() {
   // baked coastline the shader samples, so the floor the camera stops at is
   // the floor that gets drawn
   camera.floor = (x, z) => Math.min(Math.max(SLOPE * coast.sdfAt(x, z), -params.depth), 3)
+  // Bodies are seated on the bed, which the depth slider can move
+  let placedDepth = params.depth
+  ocean.bodies = placeBodies(coast, placedDepth)
   setupNoiseDebug([
     ...noise.variants.map(v => ({ name: v.name, size: noise.size, channels: v.channels })),
     { name: 'capillary', size: capNoise.size, channels: capNoise.channels },
@@ -130,6 +170,7 @@ async function main() {
       builtQuality = params.quality
       ocean = buildOcean(builtQuality)
       ocean.chain = chain
+      ocean.bodies = placeBodies(coast, placedDepth)
       foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
       filmFoam.bind(ocean.uniform, null, chain.view, null)
       if (targets) ocean.setRefractionTarget(targets.refrColor.createView())
@@ -158,6 +199,11 @@ async function main() {
     const viewProj = camera.viewProj(w / h, near)
     const lensR = 0.02 + params.waterlineThickness * 0.5
     const { lodScale, maxLayers } = QUALITY[params.quality]
+    // The depth slider moves the flat basin floor, so re-seat the bodies on it
+    if (params.depth !== placedDepth) {
+      placedDepth = params.depth
+      ocean.bodies = placeBodies(coast, placedDepth)
+    }
     clouds.update(dt, params, eye, h, Math.PI / 3)
     // Exactly once per frame: this advances the wave phases
     ocean.update(waveDt, params, noise, capNoise, viewProj, eye, sunDir, moonDir, camDepth, lodScale, maxLayers)
@@ -191,6 +237,7 @@ async function main() {
       timestampWrites: timer.writes(0),
     })
     ocean.drawRefraction(refrPass, foam.index, filmFoam.index)
+    ocean.drawBodiesRefraction(refrPass, foam.index, filmFoam.index)
     refrPass.end()
 
     const pass = encoder.beginRenderPass({

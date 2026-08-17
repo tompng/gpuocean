@@ -8,6 +8,33 @@ struct Layer {
   scroll: vec4f,
 }
 
+// --- submerged bodies -------------------------------------------------------
+// A small set of analytic ellipsoids. This one array is the SINGLE source of
+// truth: the vertex shader that draws them reads it, the sun-visibility test
+// reads it, and the mid-water cone reads it. A rock and its shadow therefore
+// cannot drift apart the way a mesh and a shadow map can — they are not two
+// representations of the same object, they are the same eight floats.
+//
+// This struct lives in wave_common because Uniforms does. Note the constraint
+// that forces every shadow FUNCTION into ocean.wgsl instead: main.js builds the
+// foam shaders as `waveCommonCode + foamCode`, with NO atmosphere.wgsl, so
+// nothing in this file may reference an atmosphere symbol (SKY_PI, WATER_TO_AIR,
+// waterSigma, ...). Only the data lives here.
+struct Body {
+  // xyz: centre, world metres. w: mean semi-axis in metres — used solely to
+  // turn the shadow test's normalized-space gap back into metres for the
+  // penumbra width.
+  centerR: vec4f,
+  // xyz: 1 / semi-axis, i.e. the affine map that takes this ellipsoid to the
+  // unit sphere. w: shadow opacity — 1 for rock, < 1 for something the beam
+  // partly gets through (a kelp clump), and 0 to disable one body's shadow
+  // while still drawing it.
+  invRadiusSoft: vec4f,
+}
+
+// Must match MAX_BODIES in src/ocean.js AND the literal in the array below.
+const MAX_BODIES: i32 = 8;
+
 struct Uniforms {
   viewProj: mat4x4f,
   cameraPos: vec3f,
@@ -99,6 +126,12 @@ struct Uniforms {
   qPad1: f32,
   // vec3f aligns to 16 B, so it starts at float index 200
   moonDir: vec3f,
+  // Count of ACTIVE bodies; the array is packed from index 0. Being a uniform,
+  // this bounds every body loop as UNIFORM control flow, which is what lets the
+  // loops sit in the same shaders as texture samples with implicit derivatives.
+  numBodies: f32,
+  // literal 8, matching the existing `array<Layer, 8>` style in this file
+  bodies: array<Body, 8>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

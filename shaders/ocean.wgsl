@@ -74,6 +74,308 @@ fn causticWeb(xz: vec2f) -> f32 {
   return pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
 }
 
+
+// ===========================================================================
+// SUN VISIBILITY — analytic, no shadow map, no depth bias
+// ===========================================================================
+//
+// One occluder set, one test, evaluated identically by every consumer: the sea
+// floor drawn directly (fs_land), the sea floor drawn into the refraction
+// target (fs_land_refract), the floor the surface shader falls back to
+// (sandA in fs), the bodies themselves (fs_body / fs_body_refract), the dry
+// beach, and the mid-water in-scatter. There is no shadow map, so there is
+// nothing to keep in sync between passes and NO BIAS TO TUNE: self-shadowing is
+// removed by instance index, exactly, rather than pushed away by an epsilon.
+
+// Solar angular radius (0.2665 deg) as a slope: penumbra half-width grows by
+// this per metre of occluder-to-receiver distance. In air this is the only
+// penumbra source — 2.6 cm at 6 m, i.e. essentially a hard edge.
+const SUN_TAN_RADIUS: f32 = 0.00465;
+// Multiple scattering in the column smears the beam far more than the disc
+// does: a boulder 2 m off the sand throws an edge tens of centimetres wide, not
+// 1 cm. Also a slope (extra penumbra per metre of in-water shadow ray).
+const SUN_SPREAD_WATER: f32 = 0.09;
+// The bed's unoccludable share: skylight and multiply-scattered light, which no
+// boulder can block. A shadow that reaches black is this constant set to 0.
+const BED_SHADOW_FLOOR: f32 = 0.34;
+// Sentinel for "exclude no body" (u32 max)
+const NO_SKIP: u32 = 0xffffffffu;
+
+// Sun direction INSIDE the water, refracted across the mean surface.
+//
+// This is not a nicety. The bed is metres down; using the AIR direction slides
+// every shadow along the sand by depth * (tan(theta_air) - tan(theta_water)) —
+// 1.7 m at 6 m depth with a 30 deg sun, a whole boulder-width, and as a
+// consistent bias rather than noise it is the kind of error the eye reads
+// immediately. Snell across the flat mean plane is the right approximation for
+// exactly the reason the surface shader's own "+1.4" sun-side path factor is:
+// wave-scale surface tilt randomises the beam WITHIN the penumbra the water
+// already imposes, it does not bias it.
+//
+// This is also the term a shadow map cannot have: an ortho depth render along
+// u.sunDir produces air-angle shadows by construction.
+fn sunDirWater() -> vec3f {
+  let s = normalize(u.sunDir);
+  // sin(theta_w) = sin(theta_a) / n  ->  the horizontal component shrinks by n
+  let h = vec2f(s.x, s.z) / WATER_TO_AIR;
+  return normalize(vec3f(h.x, sqrt(max(1.0 - dot(h, h), 1e-4)), h.y));
+}
+
+// Closest approach of the ray p + t*dir (t >= 0, dir unit, world metres) to one
+// body, in the body's own normalized space where the ellipsoid is the unit
+// sphere. Returns (gapInNormalizedSpace, tAtClosestInMetres); gap < 0 means the
+// ray passes through the body.
+//
+// Normalizing the transformed direction makes the gap a distance in THAT space,
+// i.e. in units of local semi-axis; the caller scales by centerR.w (the mean
+// semi-axis) to get approximate metres. For a strongly flattened boulder the
+// resulting PENUMBRA is therefore mildly anisotropic. That is a shading nicety,
+// not a visibility error: the hard test (gap < 0) is exact for any ellipsoid.
+fn bodyRayGap(b: Body, p: vec3f, dir: vec3f) -> vec2f {
+  let inv = b.invRadiusSoft.xyz;
+  let o = (p - b.centerR.xyz) * inv;
+  let eRaw = dir * inv;
+  let dl = max(length(eRaw), 1e-6);
+  let d = eRaw / dl;
+  // normalized-space parameter of closest approach, clamped forward: an
+  // occluder behind the receiver cannot shadow it
+  let sc = max(-dot(o, d), 0.0);
+  return vec2f(length(o + d * sc) - 1.0, sc / dl);
+}
+
+// Sun visibility at a world point: 0 fully shadowed .. 1 fully lit.
+//   lightDir  unit vector TOWARD the light (u.sunDir in air, sunDirWater()
+//             below the surface)
+//   spread    extra penumbra SLOPE (per metre of shadow ray); pass
+//             SUN_SPREAD_WATER * submergedFraction underwater, 0 in air
+//   minPen    penumbra floor in metres — antialiasing for the razor-sharp
+//             contact edge; pass length(fwidth(p.xz))
+//   skip      instance index to exclude (a body shading itself), or NO_SKIP
+fn bodyShadowSkip(p: vec3f, lightDir: vec3f, spread: f32, minPen: f32, skip: u32) -> f32 {
+  // No direct beam to occlude. Both conditions are UNIFORMS, so the nights and
+  // the no-bodies case cost one scalar branch for the whole draw rather than a
+  // loop per pixel.
+  if (u.numBodies < 0.5 || u.sunDir.y <= 0.02) { return 1.0; }
+  let n = i32(u.numBodies);
+  var vis = 1.0;
+  for (var i = 0; i < n; i++) {
+    if (u32(i) == skip) { continue; }
+    let b = u.bodies[i];
+    let g = bodyRayGap(b, p, lightDir);
+    let gapM = g.x * b.centerR.w;
+    // Penumbra half-width at the receiver: solar disc plus in-water beam
+    // spread, both proportional to occluder-to-receiver distance. It goes to
+    // zero at contact, which is correct (contact shadows are sharp) and is why
+    // minPen exists.
+    let pen = max((SUN_TAN_RADIUS + spread) * g.y, minPen);
+    let s = smoothstep(-pen, pen, gapM);
+    // min, NOT a product. Two boulders are a UNION of shadow volumes; min is
+    // the union's indicator in the hard limit, whereas multiplying drives the
+    // seam between two touching rocks darker than either one alone — which is
+    // precisely where the eye looks. (Clouds DO multiply: see cloudShadow.)
+    vis = min(vis, mix(1.0, s, b.invRadiusSoft.w));
+  }
+  return vis;
+}
+
+// There is no cloud layer in this renderer: nothing in shaders/ or src/
+// references clouds, so this is the identity and costs nothing.
+//
+// It exists as the SITE. When a cloud layer lands it belongs here and nowhere
+// else, and it must combine as a PRODUCT with the body term — clouds and
+// boulders are independent occluders of the same beam, unlike two boulders.
+// Because every caustic term below is already gated on this same scalar, a
+// cloud shadow will kill caustics for free, which is the behaviour you want.
+// (One thing it will additionally need, which is NOT here: the surface shader's
+// `spec` glitter and the `sunLev` multiply in fs are direct-beam terms too.)
+fn cloudShadow(xz: vec2f) -> f32 { return 1.0; }
+
+// ---------------------------------------------------------------------------
+// The sea bed's lit factor — shadow AND caustics, in one place
+// ---------------------------------------------------------------------------
+//
+// fs_land and fs_land_refract MUST call this rather than each spelling the
+// expression out. They shade the SAME surface: fs_land_refract's own comment
+// says it "reproduces exactly the expression the surface calls `sand`, so at
+// zero offset the swap is a visual no-op", and at the waterline their fragments
+// are coincident. Any divergence is a visible seam. (fs_land cannot be reused
+// wholesale — its submerged branch is gated on the camera being underwater,
+// which is false exactly when refraction is visible — but this factor can be,
+// and must be.)
+//
+// `focus` stays a parameter because the three callers legitimately differ:
+// fs_land uses u.uwCaustics, fs_land_refract uses u.causticStrength, and fs
+// additionally gates on smoothstep(0.04, 0.25, column) so a centimetres-thin
+// film grows no web. The SHADOW composition is what is shared.
+//
+// Note the shape: the ambient share is NOT multiplied by visibility, and the
+// caustic term is multiplied by it INCLUDING its negative inter-filament lobe.
+// Caustics are the focused direct beam; with no beam there are no filaments and
+// no inter-filament darkening either — the sand just sits at its shadow level.
+fn bedLit(p: vec3f, focus: f32, footprint: f32) -> f32 {
+  let column = max(-p.y, 0.0);
+  let submerged = smoothstep(0.02, 0.15, column);
+  let vis = bodyShadowSkip(p, sunDirWater(), SUN_SPREAD_WATER * submerged,
+                           max(footprint, 0.03), NO_SKIP) * cloudShadow(p.xz);
+  return 0.85 * mix(BED_SHADOW_FLOOR, 1.0, vis)
+       + focus * vis * (1.6 * causticWeb(p.xz) - 0.18);
+}
+
+// Dry sand's lit factor. fs (its sandMatte branch) and fs_land (its above-water
+// branch) both draw the beach and are coincident at the waterline tip, so this
+// goes in one place too. 0.55 is the sky's share and does not respond to an
+// occluder; only the N.L term does — which is why no floor constant is needed
+// here. The air sun direction is correct: nothing above water is refracted.
+fn dryLit(p: vec3f, n: vec3f, footprint: f32) -> f32 {
+  let vis = bodyShadowSkip(p, normalize(u.sunDir), 0.0, max(footprint, 0.03), NO_SKIP)
+          * cloudShadow(p.xz);
+  return 0.55 + 0.45 * max(n.y, 0.0) * vis;
+}
+
+// ===========================================================================
+// MID-WATER SHADOW — the dark cone, in CLOSED FORM. No volumetric march.
+// ===========================================================================
+//
+// Asked honestly: does a visible dark cone in mid-water need a volumetric
+// march? With a shadow map, yes, unavoidably. With analytic occluders, NO — and
+// this is the single biggest dividend of that choice.
+//
+// Under a DIRECTIONAL light the shadow volume of an ellipsoid is the ellipsoid
+// swept along the light direction: an oblique semi-infinite cylinder. In the
+// body's own normalized space (divide by the semi-axes) the ellipsoid is the
+// unit sphere, so the shadow volume is a plain CIRCULAR CYLINDER OF RADIUS 1
+// about the light axis, cut off at the terminator plane through the centre.
+// Intersecting a view ray with that is one quadratic plus one linear
+// inequality, so the shadowed SEGMENT [t0, t1] of the view ray is closed-form.
+//
+// The renderer's underwater in-scatter is already the homogeneous
+// single-scatter integral: I = J * (1 - exp(-sigma*len)), written in fs and
+// fs_land as `murk * (1 - ext)`. Removing a segment from a homogeneous
+// exponential is also closed-form: the share of that integral falling inside
+// [t0, t1] is exp(-sigma*t0) - exp(-sigma*t1). So the cone costs ONE QUADRATIC
+// AND TWO exp() PER BODY — no steps, no jitter, no banding, no dependence on
+// screen resolution, and no shadow-map fetch per step (the incoherent memory
+// traffic that actually makes volumetric shadows expensive).
+//
+// WHAT THIS CANNOT DO, stated plainly:
+//  * GOD-RAY WIGGLE. Real shafts shimmer because the surface focuses the beam.
+//    That is a volumetric caustic and it genuinely needs the caustic field
+//    evaluated at points along the ray, i.e. a real march with a TEXTURE FETCH
+//    per step — about 8 fetches per submerged pixel, roughly the cost of one
+//    more wave layer. The cone below a rock does not need it and does not get
+//    it here. If you want wiggle, that march is the price, and it is separate
+//    from and additional to everything below.
+//  * A source term that varies along the ray. J is constant, exactly as
+//    waterFogAlong() already assumes, so the cone does not itself darken with
+//    depth.
+//  * Exact union of two bodies' cones along one ray: the masses are summed and
+//    clamped to the total. Exact when the segments are disjoint (the normal
+//    case for scattered boulders), slightly over-dark when they are not.
+//  * A physical penumbra: it is faked by averaging two cylinder radii (below),
+//    which is still O(bodies) rather than O(steps).
+//  * Points strictly INSIDE a body read as lit by the terminator test. The
+//    depth buffer has already rejected those fragments, so it never shows.
+
+// Occludable share of the in-scatter: the direct beam. The rest is
+// multiply-scattered skylight arriving from every direction, which a boulder
+// cannot block. A cone that reaches black is this set to 1.
+const SHAFT_DIRECT: f32 = 0.55;
+// Wide cylinder for the faked penumbra. A single hard cylinder gives a
+// razor-edged cone that reads as a cardboard cutout underwater.
+const BEAM_PEN_WIDE: f32 = 1.35;
+// Henyey-Greenstein asymmetry. Sea water is strongly forward-scattering, which
+// is WHY shafts are obvious looking toward the sun and nearly invisible looking
+// away — and therefore why the cone is too. An art knob; 0.6 with the clamps in
+// beamGain() gives a usable range without a hot spot.
+const SHAFT_G: f32 = 0.6;
+
+fn hg(cosT: f32, g: f32) -> f32 {
+  let d = 1.0 + g * g - 2.0 * g * cosT;
+  return (1.0 - g * g) / (4.0 * SKY_PI * max(d * sqrt(max(d, 1e-4)), 1e-4));
+}
+
+// Forward-scattering gain relative to isotropic (the 1/4pi is undone, so 1.0
+// means "as bright as isotropic"). `dir` is the view direction FROM the eye;
+// the scattering cosine is dot(dir, sunW) because the beam propagates along
+// -sunW and reaches the eye along -dir. Clamped so looking straight into the
+// sun cannot push the occludable share past 1.
+fn beamGain(dir: vec3f, sunW: vec3f) -> f32 {
+  return clamp(4.0 * SKY_PI * hg(dot(dir, sunW), SHAFT_G), 0.45, 3.0);
+}
+
+// Shadowed share of the homogeneous in-scatter integral along p0 + t*dir for
+// t in [0, len], for ONE body: exp(-sigma*t0) - exp(-sigma*t1).
+// `radius` widens the shadow cylinder; see beamShadowMass.
+fn bodyShadowMass(b: Body, sw: vec3f, p0: vec3f, dir: vec3f, len: f32,
+                  sigma: f32, radius: f32) -> f32 {
+  let inv = b.invRadiusSoft.xyz;
+  let o = (p0 - b.centerR.xyz) * inv;
+  let e = dir * inv;
+  let lRaw = sw * inv;
+  let L = lRaw / max(length(lRaw), 1e-6);
+  // project the light axis out: the cylinder condition is |P*(o + t*e)| <= r
+  let A = o - L * dot(o, L);
+  let B = e - L * dot(e, L);
+  let a = dot(B, B);
+  if (a < 1e-12) { return 0.0; }          // view ray parallel to the beam
+  let hb = dot(A, B);
+  let c = dot(A, A) - radius * radius;
+  let disc = hb * hb - a * c;
+  if (disc <= 0.0) { return 0.0; }        // ray misses the shadow cylinder
+  let sq = sqrt(disc);
+  var t0 = (-hb - sq) / a;
+  var t1 = (-hb + sq) / a;
+  // Terminator half-space: only the side of the body AWAY from the sun is dark,
+  // i.e. (o + t*e).L <= 0 with L pointing toward the sun. Without this the
+  // cylinder extends upward through the rock and out the sunlit side.
+  let dL = dot(e, L);
+  let oL = dot(o, L);
+  if (abs(dL) < 1e-9) {
+    if (oL > 0.0) { return 0.0; }
+  } else if (dL > 0.0) {
+    t1 = min(t1, -oL / dL);
+  } else {
+    t0 = max(t0, -oL / dL);
+  }
+  t0 = max(t0, 0.0);
+  t1 = min(t1, len);
+  if (t1 <= t0) { return 0.0; }
+  return exp(-sigma * t0) - exp(-sigma * t1);
+}
+
+// Penumbra: two cylinder radii, mass averaged. Still closed-form — O(bodies),
+// not O(steps).
+fn beamShadowMass(sw: vec3f, p0: vec3f, dir: vec3f, len: f32, sigma: f32) -> f32 {
+  var m = 0.0;
+  let n = i32(u.numBodies);
+  for (var i = 0; i < n; i++) {
+    let b = u.bodies[i];
+    m += b.invRadiusSoft.w * 0.5
+       * (bodyShadowMass(b, sw, p0, dir, len, sigma, 1.0)
+        + bodyShadowMass(b, sw, p0, dir, len, sigma, BEAM_PEN_WIDE));
+  }
+  return m;
+}
+
+// Multiplier on the underwater in-scatter along a view ray: 1 in open water,
+// dropping toward (1 - SHAFT_DIRECT * gain) inside a body's cone. Apply it to
+// BOTH the murk and the suspended motes — the motes going dark inside the cone
+// is what actually makes it read as an occluded shaft rather than a smudge.
+//
+// `sigma` is scalar (use the green channel). The geometric shadowed FRACTION is
+// wavelength-independent; the chromatic part comes from `murk`'s own tint, and
+// the second-order shift (less direct beam, relatively more ambient) is not
+// worth three quadratics.
+fn beamVis(p0: vec3f, dir: vec3f, len: f32, sigma: f32) -> f32 {
+  if (u.numBodies < 0.5 || u.sunDir.y <= 0.02) { return 1.0; }
+  let total = 1.0 - exp(-sigma * max(len, 0.0));
+  if (total <= 1e-5) { return 1.0; }
+  let sw = sunDirWater();
+  let shaded = min(beamShadowMass(sw, p0, dir, len, sigma), total);
+  let direct = clamp(SHAFT_DIRECT * beamGain(dir, sw), 0.0, 0.92);
+  return 1.0 - direct * (shaded / total);
+}
+
 // Foam density at a point, built from the three plates.
 //
 // The plates span the coverage ramp — lace between dark water, then broken
@@ -537,13 +839,22 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // defocus fades it with column depth
   let tHit = column * lateral * u.distortionScale;
   let bottomXZ = in.world.xz + refr.xz * tHit;
-  let web = causticWeb(bottomXZ);
+
   // Caustics need some water column to focus in; a centimeters-thin film
   // (or the residual softmax offset on dry sand) must not carry the web
   let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / (120.0 * u.lodScale), 0.0, 1.0) * smoothstep(0.04, 0.25, column);
   // Analytic flat bottom, kept as the fallback wherever the screen-space tap
   // has nothing valid to say
-  let sandA = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
+  // The refracted taps below already carry the bed's shadow — they ARE the
+  // refraction pass's output. This ANALYTIC FALLBACK does not, and it is what
+  // shows wherever a tap is rejected: frame edges, grazing rays, taps landing
+  // above water. Left unshadowed, a boulder's shadow flickers back to full
+  // brightness along every one of those silhouettes.
+  // The footprint comes from in.world.xz rather than bottomXZ, which inherits
+  // the ripple normals' wobble and would turn into noise on the shadow edge.
+  let fwBed = max(length(fwidth(in.world.xz)), 0.03);
+  let bedP = vec3f(bottomXZ.x, in.world.y - column, bottomXZ.y);
+  let sandA = vec3f(0.86, 0.78, 0.58) * bedLit(bedP, focus, fwBed);
   // Screen-space refraction. The offset is the parallax between where the
   // refracted ray actually lands on the floor and this fragment's own pixel —
   // view-consistent by construction, shrinking with distance through the
@@ -578,13 +889,21 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let sunLev = sunLevel(SKY);
   // one shadow lookup per fragment, applied per term below
   let shade = cloudShade(in.world, SKY);
-  var water = mix(waterHue(u.sTurbidity, u.chlorophyll * u.sChlorophyll) * 0.16, sand, trans) * lightTint;
+  // Seen from ABOVE, the cone shows as a dimming of the water's own in-scatter
+  // along the refracted ray, not of the bed — the bed's share arrives through
+  // refrTex and through sandA. Closed form, so this is a handful of ALU on water
+  // pixels and one uniform branch when there are no bodies.
+  let bedT = column * min(lateral, 8.0);
+  let beamS = beamVis(in.world, refr, bedT,
+                      waterSigma(u.sTurbidity, u.chlorophyll * u.sChlorophyll).g);
+  var water = mix(waterHue(u.sTurbidity, u.chlorophyll * u.sChlorophyll) * 0.16 * beamS,
+                  sand, trans) * lightTint;
   water += vec3f(0.05, 0.45, 0.38) * sss;
   water *= sunLev * mix(1.0, shade, CLOUD_DIRECT_WATER);
   var color = mix(water, skyColorRough(r, SKY, 16.0), fresnel) + spec;
   // Dry sand above the runup line: matte, no fresnel reflection or caustics
   let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev
-                * mix(1.0, shade, CLOUD_DIRECT_SAND) * (0.55 + 0.45 * max(n.y, 0.0));
+                * mix(1.0, shade, CLOUD_DIRECT_SAND) * dryLit(in.world, n, fwBed);
   color = mix(sandMatte, color, waterM);
   // Seen from underneath, the whole sky squeezes into Snell's window — the
   // ~97 degree cone about vertical set by the critical angle — and outside it
@@ -675,9 +994,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Underwater the aerial perspective is the water column itself, and it
   // closes in orders of magnitude faster
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
-  var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll);
+  // Submerged camera: the same cone, now along the eye ray
+  let beamU = beamVis(u.cameraPos, -v, dist,
+                      waterSigma(u.uwTurbidity, u.chlorophyll).g * u.uwFog);
+  var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * beamU;
   if (u.camDepth > -u.lensR) {
-    murk += vec3f(0.9, 1.0, 0.95) * suspended(in.world.xz, 1.0 - ext.g);
+    murk += vec3f(0.9, 1.0, 0.95) * suspended(in.world.xz, 1.0 - ext.g) * beamU;
   }
   color = mix(air, color * ext + murk * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
@@ -713,7 +1035,9 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   let lightTint = mix(vec3f(1.0), sunTint(SKY), 0.6);
   let sunLev = sunLevel(SKY);
   let shade = cloudShade(in.world, SKY);
-  var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev * mix(1.0, shade, CLOUD_DIRECT_SAND) * (0.55 + 0.45 * max(n.y, 0.0));
+  let fwL = max(length(fwidth(in.world.xz)), 0.03);
+  var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLev
+            * mix(1.0, shade, CLOUD_DIRECT_SAND) * dryLit(in.world, n, fwL);
   let dist = distance(u.cameraPos, in.world);
   let v = normalize(u.cameraPos - in.world);
   // Submerged, this same mesh IS the basin floor: daylight reaches it filtered
@@ -722,16 +1046,20 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   let uw = underwaterAt(-v, u.camDepth, u.lensR);
   let column = max(-in.world.y, 0.0);
   let focus = u.uwCaustics * exp(-column * 0.12) * clamp(1.0 - dist / (120.0 * u.lodScale), 0.0, 1.0);
-  let floorLit = 0.85 + focus * (1.6 * causticWeb(in.gridXZ) - 0.18);
+  // vs_land sets out.gridXZ = xz and out.world.xz = xz, so in.world.xz IS
+  // in.gridXZ here and bedLit's web sample matches the previous code exactly.
+  let floorLit = bedLit(in.world, focus, fwL);
   let floor = vec3f(0.86, 0.78, 0.58) * floorLit
             * waterAmbient(column, SKY, waterSigma(u.uwTurbidity, u.chlorophyll)) * (0.55 + 0.45 * max(n.y, 0.0));
   color = mix(color, floor, uw);
   let fog = 1.0 - exp(-dist * 3e-5);
   let air = mix(color, skyColorRough(normalize(vec3f(-v.x, 0.02, -v.z)), SKY, 40.0), fog);
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
-  var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll);
+  let beamU = beamVis(u.cameraPos, -v, dist,
+                      waterSigma(u.uwTurbidity, u.chlorophyll).g * u.uwFog);
+  var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * beamU;
   if (u.camDepth > -u.lensR) {
-    murk += vec3f(0.9, 1.0, 0.95) * suspended(in.world.xz, 1.0 - ext.g);
+    murk += vec3f(0.9, 1.0, 0.95) * suspended(in.world.xz, 1.0 - ext.g) * beamU;
   }
   color = mix(air, color * ext + murk * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
@@ -750,7 +1078,10 @@ fn fs_land_refract(in: VSOut) -> @location(0) vec4f {
   let column = max(-in.world.y, 0.0);
   let dist = distance(u.cameraPos, in.world);
   let focus = u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / (120.0 * u.lodScale), 0.0, 1.0);
-  let lit = 0.85 + focus * (1.6 * causticWeb(in.gridXZ) - 0.18);
+  let fw = max(length(fwidth(in.world.xz)), 0.03);
+  // Both bed paths go through bedLit, so "the refracted floor equals the direct
+  // floor at zero offset" is guaranteed by construction, not maintained by hand
+  let lit = bedLit(in.world, focus, fw);
   // Soft over ~15 cm of terrain height so the mask ramps instead of popping
   let submerged = smoothstep(0.02, 0.15, column);
   return vec4f(vec3f(0.86, 0.78, 0.58) * lit, submerged);
@@ -762,4 +1093,175 @@ fn fs_wire(in: VSOut) -> @location(0) vec4f {
     discard;
   }
   return vec4f(0.15, 0.85, 0.5, 1.0);
+}
+
+// ===========================================================================
+// DRAWING THE BODIES
+// ===========================================================================
+//
+// One shared unit-ball mesh, instanced; the transform comes from
+// u.bodies[instance_index]. There is deliberately NO per-body vertex data and
+// no per-body instance buffer: the array the shadow test reads is the array the
+// vertex shader reads, so there is no second copy and nothing to desync.
+//
+// Two entry points share this vertex shader:
+//   fs_body_refract -> the refraction target (linear radiance, no envelope),
+//                      sharing the bed's depth buffer so the rock occludes the
+//                      sand. This is what makes the rock visible THROUGH the
+//                      surface with ZERO changes to the surface shader: its tap
+//                      machinery already handles whatever is in refrTex.
+//   fs_body         -> the main pass, for a submerged or breaching camera, with
+//                      exactly fs_land's fog tail.
+// Nothing is blended and nothing is sorted: everything is opaque and
+// depth-tested. That is WHY the from-above case resolves to the refracted image
+// automatically — the ocean surface is opaque and nearer, so it wins the depth
+// test and what you see is its refracted tap.
+
+const ROCK_ALBEDO: vec3f = vec3f(0.30, 0.29, 0.27);
+
+struct BodyIn {
+  // unit sphere direction; the mesh is one shared unit ball
+  @location(0) dir: vec3f,
+}
+
+struct BodyOut {
+  @builtin(position) clip: vec4f,
+  @location(0) world: vec3f,
+  @location(1) nrm: vec3f,
+  // FLAT: the index the shadow test excludes must be exact, not 2.9999
+  @location(2) @interpolate(flat) bi: u32,
+}
+
+// Low-frequency silhouette roughening. Deliberately low-frequency: the shadow
+// test uses the SMOOTH ellipsoid, so a high-frequency silhouette would visibly
+// disagree with its own shadow outline. At +-9% over three lobes the
+// disagreement is under 20 cm on a 2 m boulder — inside the penumbra the water
+// already imposes (SUN_SPREAD_WATER * distance is ~35 cm at 4 m). This is the
+// one approximation the analytic route makes; if it ever matters, either drop
+// the bump or fold the same hash into bodyRayGap and give up the closed-form
+// cone.
+fn bodyBump(dir: vec3f, seed: f32) -> f32 {
+  let a = sin(dir.x * 3.1 + seed * 1.7) * sin(dir.y * 2.3 - seed * 2.9) * sin(dir.z * 2.7 + seed * 0.7);
+  let b = sin(dir.x * 5.7 - seed * 3.3 + dir.z * 4.1);
+  return 1.0 + 0.09 * a + 0.05 * b;
+}
+
+// Surface point in world METRES relative to the body centre. Because this
+// multiplies by the semi-axes, a normal built from finite differences of THIS
+// function is already the world normal — no inverse-transpose needed.
+fn bodyLocal(dir: vec3f, r: vec3f, seed: f32) -> vec3f {
+  return dir * bodyBump(dir, seed) * r;
+}
+
+@vertex
+fn vs_body(in: BodyIn, @builtin(instance_index) inst: u32) -> BodyOut {
+  let b = u.bodies[i32(inst)];
+  // semi-axes back out of the reciprocals the shadow test wants
+  let r = vec3f(1.0) / max(b.invRadiusSoft.xyz, vec3f(1e-4));
+  let seed = f32(inst) * 3.7 + 1.3;
+  let d = normalize(in.dir);
+  // Tangent frame, robust at the poles. (t1, t2, d) is right-handed
+  // (cross(t1, t2) = d), so the cross product below points outward.
+  let t0 = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(d.y) > 0.9);
+  let t1 = normalize(cross(t0, d));
+  let t2 = cross(d, t1);
+  let eps = 0.03;
+  let p0 = bodyLocal(d, r, seed);
+  let pu = bodyLocal(normalize(d + t1 * eps), r, seed);
+  let pv = bodyLocal(normalize(d + t2 * eps), r, seed);
+  var nrm = normalize(cross(pu - p0, pv - p0));
+  if (dot(nrm, d) < 0.0) { nrm = -nrm; }
+  var out: BodyOut;
+  out.world = b.centerR.xyz + p0;
+  out.nrm = nrm;
+  out.bi = inst;
+  out.clip = u.viewProj * vec4f(out.world, 1.0);
+  return out;
+}
+
+// The body's lit FACTOR — same shape as bedLit's: a share that survives shadow
+// (sky fill) plus one that does not (N.L beam, and caustics).
+//
+// NO LIGHTING ENVELOPE HERE — no sunLevel, no sunTint, no column extinction.
+// This is not an oversight, it is the contract the refraction target already
+// has: the surface shader multiplies its refrTex tap by `lightTint`, `sunLev`
+// and Beer-Lambert AFTER sampling (exactly as it does for fs_land_refract's
+// sand), so including them here would apply them twice. fs_body, which has no
+// surface above it, applies its own.
+//
+// `skip` is this body's own instance index. Excluding self BY INDEX is why this
+// whole feature has no depth bias: the lit hemisphere is handled exactly by
+// N.L, and there is no epsilon anywhere to tune, leak, or peter-pan.
+fn bodyLitFactor(p: vec3f, n: vec3f, skip: u32, dist: f32,
+                 causticGain: f32, footprint: f32) -> f32 {
+  let column = max(-p.y, 0.0);
+  let submerged = smoothstep(0.02, 0.15, column);
+  // A body breaking the surface transitions from the air beam to the refracted
+  // one over the same 13 cm the sand's submerged mask uses.
+  let ldir = normalize(mix(normalize(u.sunDir), sunDirWater(), submerged));
+  let vis = bodyShadowSkip(p, ldir, SUN_SPREAD_WATER * submerged,
+                           max(footprint, 0.03), skip) * cloudShadow(p.xz);
+  let nl = max(dot(n, ldir), 0.0);
+  // sky fill: a boulder sees roughly the upper hemisphere. Unoccludable, so it
+  // is the body's equivalent of BED_SHADOW_FLOOR — same 0.34 base, so a rock
+  // and the sand it sits on go into shadow to the same depth.
+  let fill = 0.34 + 0.26 * max(n.y, 0.0);
+  // Caustics land on the rock's up-facing surfaces exactly as on the sand, and
+  // die in shadow with everything else.
+  let focus = causticGain * exp(-column * 0.12)
+            * clamp(1.0 - dist / (120.0 * u.lodScale), 0.0, 1.0) * submerged;
+  return 0.9 * (fill + nl * vis)
+       + focus * vis * max(n.y, 0.0) * (1.6 * causticWeb(p.xz) - 0.18);
+}
+
+@fragment
+fn fs_body_refract(in: BodyOut) -> @location(0) vec4f {
+  let dist = distance(u.cameraPos, in.world);
+  let v = normalize(u.cameraPos - in.world);
+  var n = normalize(in.nrm);
+  if (dot(n, v) < 0.0) { n = -n; }
+  let fw = max(length(fwidth(in.world.xz)), 0.03);
+  let lit = bodyLitFactor(in.world, n, in.bi, dist, u.causticStrength, fw);
+  // `a` is the submerged mask the surface uses to reject taps that land above
+  // water — the SAME ramp fs_land_refract uses, so a rock breaching the surface
+  // hands back to the unoffset tap over the same 13 cm the sand does.
+  let column = max(-in.world.y, 0.0);
+  return vec4f(ROCK_ALBEDO * lit, smoothstep(0.02, 0.15, column));
+}
+
+@fragment
+fn fs_body(in: BodyOut) -> @location(0) vec4f {
+  let SKY = skyState(u.sunDir, u.moonDir, u.skyTurbidity, u.skyRayleigh, u.skyIntensity);
+  let dist = distance(u.cameraPos, in.world);
+  let v = normalize(u.cameraPos - in.world);
+  var n = normalize(in.nrm);
+  if (dot(n, v) < 0.0) { n = -n; }
+  let fw = max(length(fwidth(in.world.xz)), 0.03);
+  let column = max(-in.world.y, 0.0);
+  let submerged = smoothstep(0.02, 0.15, column);
+  let lit = bodyLitFactor(in.world, n, in.bi, dist, u.uwCaustics, fw);
+  // This path has no surface above it, so it supplies its own envelope: the
+  // column's own extinction of the downwelling beam below water, the plain
+  // solar level above.
+  let lightTint = mix(vec3f(1.0), sunTint(SKY), 0.6);
+  let envelope = mix(vec3f(sunLevel(SKY)) * lightTint,
+                     waterAmbient(column, SKY, waterSigma(u.uwTurbidity, u.chlorophyll)),
+                     submerged);
+  var color = ROCK_ALBEDO * lit * envelope;
+  // From here on this is fs_land's tail verbatim. Copied rather than shared
+  // because fs_land's tail is inlined; if it is ever factored out, factor this
+  // with it.
+  let uw = underwaterAt(-v, u.camDepth, u.lensR);
+  let fog = 1.0 - exp(-dist * 3e-5);
+  let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), SKY), fog);
+  let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
+  let beamU = beamVis(u.cameraPos, -v, dist,
+                      waterSigma(u.uwTurbidity, u.chlorophyll).g * u.uwFog);
+  var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * beamU;
+  if (u.camDepth > -u.lensR) {
+    murk += vec3f(0.9, 1.0, 0.95) * suspended(in.world.xz, 1.0 - ext.g) * beamU;
+  }
+  color = mix(air, color * ext + murk * (1.0 - ext), uw);
+  color = 1.0 - exp(-1.8 * color);
+  return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }

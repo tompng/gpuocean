@@ -35,6 +35,9 @@ const RIBBON_SPAN = 28
 const RIBBON_CELLS = 140
 // Rise time of foam generation, roughly the crest's texel-crossing time [s]
 const FOAM_RISE = 0.08
+// Must match the literal in `bodies: array<Body, 8>` in wave_common.wgsl
+const MAX_BODIES = 8
+
 // Field offsets into the uniform buffer, mirroring Uniforms in
 // wave_common.wgsl. Writing by name rather than by raw index is not cosmetic:
 // every offset bug this file has had — a resized struct that outgrew its
@@ -63,7 +66,7 @@ const UNIFORM_LAYOUT = buildLayout([
   ['contactWidth', 1], ['streaks', 1], ['shoreWidth', 1], ['lapOvershoot', 1],
   ['surgeRate', 1], ['skyTurbidity', 1], ['skyRayleigh', 1], ['skyIntensity', 1],
   ['warpCell', 1], ['warpLinear', 1], ['plateSel', 1], ['qPad1', 1],
-  ['moonDir', 3],
+  ['moonDir', 3], ['numBodies', 1], ['bodies', MAX_BODIES * 8],
 ])
 
 // The shader is the source of truth, so the field list above is checked against
@@ -184,6 +187,44 @@ export class Ocean {
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     })
     this.wireLandPipeline = makePipeline('vs_land', 'fs_wire', 'line-list')
+    // Bodies. Two pipelines, both on `base.layout`, so the EXISTING bind groups
+    // work unchanged — the transforms live in the uniform buffer the shadow test
+    // already reads, so the drawn rock and its shadow cannot drift apart.
+    const bodyVertex = entryPoint => ({
+      module,
+      entryPoint,
+      buffers: [{
+        arrayStride: 12,
+        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
+      }],
+    })
+    // cullMode 'none' deliberately: the ball is closed and depth-tested, so
+    // culling buys a little fragment work at the cost of a whole class of
+    // "my rock is invisible" winding bugs. Switch to 'back' once verified.
+    this.bodyPipeline = device.createRenderPipeline({
+      ...base,
+      vertex: bodyVertex('vs_body'),
+      fragment: { module, entryPoint: 'fs_body', targets: [{ format }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+    })
+    // Single-sampled, like the rest of the refraction pass: the rock's
+    // silhouette there is aliased, but it is then sampled with a linear sampler
+    // at a wobbling offset and multiplied by extinction — the same argument the
+    // file already makes for the bed.
+    this.bodyRefractPipeline = device.createRenderPipeline({
+      layout: base.layout,
+      vertex: bodyVertex('vs_body'),
+      fragment: { module, entryPoint: 'fs_body_refract', targets: [{ format: REFRACT_FORMAT }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: 1 },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    })
+    const [bodyDirs, bodyIdx] = buildBall(20, 12)
+    this.bodyVertexBuffer = createVertexBuffer(device, bodyDirs)
+    this.bodyIndices = createIndexBuffer(device, bodyIdx)
+    this.bodyIndexCount = bodyIdx.length
+    // filled in by main.js; { c: [x,y,z], r: [rx,ry,rz], opacity }
+    this.bodies = []
     this.bindLayout = bindLayout
     this.filmGroups = filmFoamViews.map(view => device.createBindGroup({
       layout: filmLayout,
@@ -288,6 +329,19 @@ export class Ocean {
     pass.setVertexBuffer(0, this.vertexBuffer)
     pass.setIndexBuffer(this.triIndices, 'uint32')
     pass.drawIndexed(this.triCount)
+  }
+
+  // The bodies, into the refraction target. Called AFTER drawRefraction so the
+  // bed's depth is already down and buried parts are rejected by early-z;
+  // either order is correct, since the shared depth buffer decides.
+  drawBodiesRefraction(pass, foamIndex, filmIndex) {
+    if (!this.bodies.length) return
+    pass.setBindGroup(0, this.refrBindGroups[foamIndex])
+    pass.setBindGroup(1, this.filmGroups[filmIndex])
+    pass.setPipeline(this.bodyRefractPipeline)
+    pass.setVertexBuffer(0, this.bodyVertexBuffer)
+    pass.setIndexBuffer(this.bodyIndices, 'uint32')
+    pass.drawIndexed(this.bodyIndexCount, Math.min(this.bodies.length, MAX_BODIES))
   }
 
   // Advances time and writes the uniform. Must run exactly once per frame,
@@ -438,6 +492,21 @@ export class Ocean {
     u[F.simDt] = Math.min(dt, 0.033)
     u[F.waveK] = 2 * Math.PI / params.wavelength
     u[F.foamScaleUnused] = 1
+    // Bodies. Written every frame because the uniform is rewritten wholesale;
+    // the shader reads THIS array for the shadow test, the mid-water cone and
+    // the draw, so there is no second copy to keep in sync.
+    const nb = Math.min(this.bodies.length, MAX_BODIES)
+    u[F.numBodies] = nb
+    for (let i = 0; i < nb; i++) {
+      const b = this.bodies[i]
+      const o = F.bodies + i * 8
+      u[o] = b.c[0]; u[o + 1] = b.c[1]; u[o + 2] = b.c[2]
+      // mean semi-axis: the shadow test's only use for a scalar radius, turning
+      // its normalized-space gap back into metres for the penumbra width
+      u[o + 3] = (b.r[0] + b.r[1] + b.r[2]) / 3
+      u[o + 4] = 1 / b.r[0]; u[o + 5] = 1 / b.r[1]; u[o + 6] = 1 / b.r[2]
+      u[o + 7] = b.opacity ?? 1
+    }
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
   }
@@ -462,6 +531,15 @@ export class Ocean {
     pass.setVertexBuffer(0, this.vertexBuffer)
     pass.setIndexBuffer(wire ? this.lineIndices : this.triIndices, 'uint32')
     pass.drawIndexed(wire ? this.lineCount : this.triCount)
+    // Order against the ocean surface is immaterial: everything is opaque and
+    // depth-tested, so a submerged body loses to the nearer surface and what
+    // shows is the surface's refracted tap of the SAME body out of refrTex.
+    if (!wire && this.bodies.length) {
+      pass.setPipeline(this.bodyPipeline)
+      pass.setVertexBuffer(0, this.bodyVertexBuffer)
+      pass.setIndexBuffer(this.bodyIndices, 'uint32')
+      pass.drawIndexed(this.bodyIndexCount, Math.min(this.bodies.length, MAX_BODIES))
+    }
   }
 }
 
@@ -530,6 +608,44 @@ function buildIslandVertices(nx, cols) {
     }
   }
   return data
+}
+
+// Unit ball as a lat-long mesh with the seam COLUMN SHARED (indices wrap rather
+// than duplicating vertices), so the direction-hashed radial displacement in
+// vs_body lands on one value at the seam and opens no crack. Poles are single
+// vertices. Positions are unit directions; the vertex shader scales them by the
+// per-instance semi-axes.
+function buildBall(nu, nv) {
+  const pos = [0, 1, 0]
+  for (let j = 1; j < nv; j++) {
+    const phi = Math.PI * j / nv
+    const sy = Math.cos(phi)
+    const sr = Math.sin(phi)
+    for (let i = 0; i < nu; i++) {
+      const th = 2 * Math.PI * i / nu
+      pos.push(sr * Math.cos(th), sy, sr * Math.sin(th))
+    }
+  }
+  pos.push(0, -1, 0)
+  const ring = j => 1 + (j - 1) * nu
+  const south = 1 + (nv - 1) * nu
+  const idx = []
+  for (let i = 0; i < nu; i++) {
+    idx.push(0, ring(1) + i, ring(1) + (i + 1) % nu)
+  }
+  for (let j = 1; j < nv - 1; j++) {
+    const a = ring(j)
+    const b = ring(j + 1)
+    for (let i = 0; i < nu; i++) {
+      const i1 = (i + 1) % nu
+      idx.push(a + i, b + i, a + i1)
+      idx.push(a + i1, b + i, b + i1)
+    }
+  }
+  for (let i = 0; i < nu; i++) {
+    idx.push(south, ring(nv - 1) + (i + 1) % nu, ring(nv - 1) + i)
+  }
+  return [new Float32Array(pos), new Uint32Array(idx)]
 }
 
 function createVertexBuffer(device, data) {
