@@ -5,6 +5,9 @@
 // channels mirror the world foam buffer: R decayed, G glow, B/A fresh.
 @group(0) @binding(3) var prevFoam: texture_2d<f32>;
 
+// Band metres of generating shore belt at shoreWidth = 1
+const SHORE_BELT: f32 = 14.0;
+
 struct VSOut {
   @builtin(position) pos: vec4f,
   @location(0) uv: vec2f,
@@ -29,8 +32,17 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let compress = (simState(b - e, col).x - simState(b + e, col).x) / (2.0 * e * restScale);
   let sNow = simRestS(b) + sim.x;
   let sb = simBlend(b);
-  let inFilm = sb * (1.0 - smoothstep(sim.z - 0.3, sim.z + 0.1, sNow));
-  let gen = inFilm * smoothstep(0.25, 0.7, compress);
+  // lapOvershoot lets a receding lap keep depositing past the instantaneous
+  // swash tip, so its lace strands at the high-water mark instead of being cut
+  // off exactly at the moving edge — that stationary tide line is what the
+  // sparse plate is for
+  let tip = sim.z + u.lapOvershoot;
+  let inFilm = sb * (1.0 - smoothstep(tip - 0.3, tip + 0.1, sNow));
+  // shoreWidth is the cross-shore extent of the generating belt, rolled off
+  // over its landward 40% so the upper beach face stays clean
+  let belt = 1.0 - smoothstep(0.6 * SHORE_BELT * u.shoreWidth, SHORE_BELT * u.shoreWidth, b);
+  // surgeRate is the gain from swash convergence to foam birth
+  let gen = inFilm * belt * smoothstep(0.25, 0.7, compress * u.surgeRate);
   // Foam on the beach face is swallowed where the waves flood over it again
   let sJ = -REST_DEPTH / u.slope + simState(0.0, col).x;
   let tyM = u.slope * simRestS(b);

@@ -94,7 +94,7 @@ fn foamPlate(xz: vec2f, flow: vec2f, cover: f32, lod: f32) -> f32 {
   // — at k = 2.5 a round bubble becomes a 6:1 smear, and since this plate
   // already carries flow streaks photographically it double-counts them.
   // Elongating one axis keeps the cross-flow scale honest.
-  let k = 1.0 + 2.0 * u.streaks;
+  let k = 1.0 + 1.2 * u.streaks;
   let along = dot(xz, flow) / k + drift;
   let across = dot(xz, vec2f(-flow.y, flow.x));
   let mid = textureSampleLevel(foamPlates, samp, vec2f(along, across) * s, 1, lod).r;
@@ -103,6 +103,14 @@ fn foamPlate(xz: vec2f, flow: vec2f, cover: f32, lod: f32) -> f32 {
   let dense = textureSampleLevel(foamPlates, samp, (xz + flow * (drift * 1.7)) * (s * 2.2 / u.crestScale), 2, lod).r;
   return mix(mix(sparse, mid, smoothstep(u.laceLow, u.laceHigh, cover)),
              dense, smoothstep(u.crestStart, u.crestFull, cover));
+}
+
+// Particulate suspended in the column. Not a volumetric march: the motes ride
+// the fog weight, so they thicken with path length the way real particulate
+// does, without a second pass.
+fn suspended(xz: vec2f, fogAmount: f32) -> f32 {
+  let m = textureSample(capTex, samp, xz * 2.6 + vec2f(0.021, -0.014) * u.time).x;
+  return u.particleDensity * 0.11 * smoothstep(0.1, 0.75, m) * fogAmount;
 }
 
 struct VSIn {
@@ -561,17 +569,29 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the surface is a perfect mirror mailing the view back down into the
   // basin. n was already flipped to face the camera above, so it points down
   // into the water here: exactly the inward normal refract() wants.
-  let tRay = refract(-v, n, WATER_TO_AIR);
+  // Small ripples the surface carries break the window's rim up; this is the
+  // (uw) ripple control, acting only on the submerged view.
+  // Guarded on camDepth/lensR, which are UNIFORMS: when the eye is clear of
+  // the surface no fragment can be submerged, so this whole branch is skipped
+  // rather than paid for on every above-water pixel. Being uniform, the branch
+  // may legally contain texture samples with implicit derivatives.
+  var nUW = n;
+  if (u.camDepth > -u.lensR) {
+    let chop = textureSample(capTex, samp, in.world.xz * 0.8 + vec2f(0.031, -0.019) * u.time).zw
+             * (0.28 * u.rippleStrength);
+    nUW = normalize(n + vec3f(chop.x, 0.0, chop.y));
+  }
+  let tRay = refract(-v, nUW, WATER_TO_AIR);
   let tir = dot(tRay, tRay) < 1e-6;
   // Both the mirrored ray and the sky ray need a floor hit for the mirror
   // term: march the reflection down to the flat basin and tint by the path
-  let mRay = reflect(-v, n);
+  let mRay = reflect(-v, nUW);
   let mPath = min((in.world.y + u.seaDepth) / max(-mRay.y, 0.05), 400.0);
   let mirror = mix(waterFogAlong(mRay, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll), sand * lightTint * sunLev,
                    exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * mPath));
   // Fresnel on the air side; at and past the critical angle it saturates to a
   // full mirror, which is what closes the rim of the window
-  let cosAir = clamp(dot(tRay, -n), 0.0, 1.0);
+  let cosAir = clamp(dot(tRay, -nUW), 0.0, 1.0);
   let fresUp = select(0.02 + 0.98 * pow(1.0 - cosAir, 5.0), 1.0, tir);
   // skyColor already carries the sun disc, so the window shows the sun on its
   // own; the above-water spec lobe belongs to the other side of the interface
@@ -596,14 +616,17 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the film's compressed material frame cannot pick a level that shimmers
   let plateLod = max(log2(max(length(fwidth(in.world.xz)) / (5.0 * u.noiseScale), 1e-6) * 1024.0), 0.0);
   let patWave = foamPlate(in.gridXZ, waveFlow, foamAcc.r, plateLod);
-  // Over-compressed foam filaments merge instead of thinning forever: as
-  // the film compresses, coarsen in the cross-shore direction only, so the
-  // rendered streaks stop shrinking. In the film frame flow is +band.
-  // Gentler than the procedural pattern needed — this is a photograph, and
-  // past about 4:1 the bubbles read as smear rather than as stretched foam.
-  let bStretch = mix(2.0, 4.0, 1.0 - smoothstep(0.07, 0.4, in.stretch));
+  // The film's material band compresses onto the still-water wedge about
+  // 14:1, so sampling the plate at raw band coordinates squashes every bubble
+  // by that factor in the rendered image. Converting the band coordinate to
+  // world metres with the LOCAL stretch makes the plate isotropic on screen
+  // and keeps it anchored to the water rather than to the ground.
+  // Clamped because an unclamped factor lets over-compressed filaments thin
+  // without bound, which is what the old fixed coarsening was guarding.
+  let restStretch = REST_DEPTH / u.slope / SIM_SPAN;
+  let bToWorld = clamp(in.stretch, restStretch * 0.6, restStretch * 3.0);
   let filmCover = filmAcc.b + filmAcc.r * 0.8;
-  let patFilm = foamPlate(vec2f(in.st.x / bStretch, colT(in.st.y)), vec2f(1.0, 0.0), filmCover, plateLod);
+  let patFilm = foamPlate(vec2f(in.st.x * bToWorld, colT(in.st.y)), vec2f(1.0, 0.0), filmCover, plateLod);
   let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * foamAcc.r));
   let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * filmCover));
   // The unbroken lip at the swash front: a thin water column carries a bright
@@ -625,7 +648,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Underwater the aerial perspective is the water column itself, and it
   // closes in orders of magnitude faster
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
-  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
+  var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll);
+  if (u.camDepth > -u.lensR) {
+    murk += vec3f(0.9, 1.0, 0.95) * suspended(in.world.xz, 1.0 - ext.g);
+  }
+  color = mix(air, color * ext + murk * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }
@@ -674,7 +701,11 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   let fog = 1.0 - exp(-dist * 3e-5);
   let air = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), SKY), fog);
   let ext = exp(-waterSigma(u.uwTurbidity, u.chlorophyll) * u.uwFog * dist);
-  color = mix(air, color * ext + waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll) * (1.0 - ext), uw);
+  var murk = waterFogAlong(-v, u.camDepth, SKY, u.uwTurbidity, u.chlorophyll);
+  if (u.camDepth > -u.lensR) {
+    murk += vec3f(0.9, 1.0, 0.95) * suspended(in.world.xz, 1.0 - ext.g);
+  }
+  color = mix(air, color * ext + murk * (1.0 - ext), uw);
   color = 1.0 - exp(-1.8 * color);
   return vec4f(pow(color, vec3f(1.0 / 2.2)), 1.0);
 }
