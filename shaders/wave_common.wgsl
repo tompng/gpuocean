@@ -45,7 +45,7 @@ struct Uniforms {
   foamDecaySwallow: f32,
   simDt: f32,
   waveK: f32,
-  shoreCurve: f32,
+  padC: f32,
   // retired: the foam plates carry their own scale via noiseScale
   foamScaleUnused: f32,
   // mainland film window: center z (follows the camera in whole-column

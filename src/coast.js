@@ -149,6 +149,10 @@ function bakeSDF(device, coast) {
   for (const p of pts) buckets[bIndex(p[0], p[1])].push(p)
 
   const data = new Uint16Array(SDF_SIZE * SDF_SIZE)
+  // kept in full precision as well: the camera needs the sea-floor height on
+  // the CPU to stay above it, and reading the same baked field the shader
+  // samples is what keeps the two agreeing
+  const field = new Float32Array(SDF_SIZE * SDF_SIZE)
   const texel = 2 * SDF_EXTENT / SDF_SIZE
   for (let iz = 0; iz < SDF_SIZE; iz++) {
     const z = -SDF_EXTENT + (iz + 0.5) * texel
@@ -176,6 +180,7 @@ function bakeSDF(device, coast) {
       let sd = Math.sqrt(bd)
       if (bp && (x - bp[0]) * bp[2] + (z - bp[1]) * bp[3] < 0) sd = -sd
       data[iz * SDF_SIZE + ix] = f16(sd)
+      field[iz * SDF_SIZE + ix] = sd
     }
   }
   const texture = device.createTexture({
@@ -185,6 +190,27 @@ function bakeSDF(device, coast) {
   })
   device.queue.writeTexture({ texture }, data, { bytesPerRow: SDF_SIZE * 2 }, [SDF_SIZE, SDF_SIZE])
   coast.sdfView = texture.createView()
+
+  // Mirrors coastSDF() in wave_common.wgsl: bilinear over the baked field,
+  // falling back to the straight baseline shore beyond the baked region
+  coast.sdfAt = (x, z) => {
+    const fx = (x / (2 * SDF_EXTENT) + 0.5) * SDF_SIZE - 0.5
+    const fz = (z / (2 * SDF_EXTENT) + 0.5) * SDF_SIZE - 0.5
+    const cl = v => Math.min(Math.max(v, 0), SDF_SIZE - 1)
+    const x0 = Math.floor(cl(fx))
+    const z0 = Math.floor(cl(fz))
+    const x1 = Math.min(x0 + 1, SDF_SIZE - 1)
+    const z1 = Math.min(z0 + 1, SDF_SIZE - 1)
+    const ax = cl(fx) - x0
+    const az = cl(fz) - z0
+    const at = (ix, iz) => field[iz * SDF_SIZE + ix]
+    const baked = (at(x0, z0) * (1 - ax) + at(x1, z0) * ax) * (1 - az)
+                + (at(x0, z1) * (1 - ax) + at(x1, z1) * ax) * az
+    const m = Math.max(Math.abs(x), Math.abs(z))
+    const t = Math.min(Math.max((m - (SDF_EXTENT - 48)) / 40, 0), 1)
+    const far = t * t * (3 - 2 * t)
+    return baked * (1 - far) + (x - BASE_SHORE_X) * far
+  }
 }
 
 function uploadMainTable(device, coast) {

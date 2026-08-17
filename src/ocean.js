@@ -43,16 +43,16 @@ const FOAM_RISE = 0.08
 // order the shader uses and applies WGSL's alignment rules, and asserts the
 // total, so a struct edited on one side and not the other fails at startup.
 const UNIFORM_LAYOUT = buildLayout([
-  ['viewProj', 16], ['cameraPos', 3], ['time', 1], ['sunDir', 3], ['padA', 1],
+  ['viewProj', 16], ['cameraPos', 3], ['time', 1], ['sunDir', 3], ['islandArcStep', 1],
   ['numLayers', 1], ['choppiness', 1], ['dGrad', 1], ['hGrad', 1],
   ['foamCX', 1], ['foamCZ', 1], ['foamDX', 1], ['foamDZ', 1],
   ['layers', 64], ['capLayers', 48],
   ['capHGrad', 1], ['rippleBias', 1], ['sssStrength', 1], ['ampInv', 1],
   ['seaDepth', 1], ['causticStrength', 1], ['causticScale', 1],
   ['leanX', 1], ['leanY', 1], ['foamThreshold', 1], ['foamRegion', 1],
-  ['foamDecay', 1], ['foamDecayG', 1], ['foamRise', 1], ['shoreX', 1],
+  ['foamDecay', 1], ['foamDecayG', 1], ['foamRise', 1], ['padB', 1],
   ['slope', 1], ['foamDecaySwallow', 1], ['simDt', 1], ['waveK', 1],
-  ['shoreCurve', 1], ['foamScaleUnused', 1], ['simZBase', 1], ['simZShift', 1],
+  ['padC', 1], ['foamScaleUnused', 1], ['simZBase', 1], ['simZShift', 1], ['simTCam', 1],
   ['camDepth', 1], ['lensR', 1],
   ['uwTurbidity', 1], ['uwFog', 1], ['uwCaustics', 1],
   ['distortionStrength', 1], ['distortionScale', 1], ['particleDensity', 1],
@@ -111,7 +111,7 @@ const REFRACT_FORMAT = 'rgba16float'
 const PLATE_SEL = { blend: -1, sparse: 0, mid: 1, dense: 2, procedural: 3 }
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, foamPlates, simView, coastView, sdfView, mainTableView, format, opts = {}) {
     checkUniformLayout(code)
     this.device = device
     this.gridN = opts.gridN ?? GRID_N
@@ -371,8 +371,9 @@ export class Ocean {
     u[F.foamDecay] = Math.exp(-dt / life)
     u[F.foamDecayG] = Math.exp(-dt / (life * 0.25))
     u[F.foamRise] = Math.exp(-dt / FOAM_RISE)
-    u[F.shoreX] = SHORE_X
     u[F.slope] = SLOPE
+    u[F.islandArcStep] = this.chain.islandArcStep
+    u[F.simTCam] = this.chain.tCamSnap
     // world foam window follows the camera, snapped to buffer texels so the
     // carried-over content resamples exactly; frozen while paused so the
     // accumulated shift never outruns the skipped foam passes
@@ -433,7 +434,6 @@ export class Ocean {
     u[F.foamDecaySwallow] = Math.exp(-dt / 0.5)
     u[F.simDt] = Math.min(dt, 0.033)
     u[F.waveK] = 2 * Math.PI / params.wavelength
-    u[F.shoreCurve] = SHORE_CURVE
     u[F.foamScaleUnused] = 1
     this.device.queue.writeBuffer(this.uniform, 0, u)
 

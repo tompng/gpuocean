@@ -3,7 +3,7 @@ import { generateGravityNoiseSet, generateCapillaryNoiseTexture, generateFoamPat
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
 import { FoamSim } from './foam.js'
-import { ChainSim, sampleWaveLevel, sampleWaveHeight } from './chain.js'
+import { ChainSim, sampleWaveLevel, sampleWaveHeight, SLOPE } from './chain.js'
 import { buildCoast } from './coast.js'
 import { Sky } from './sky.js'
 import { OrbitCamera } from './camera.js'
@@ -76,19 +76,23 @@ async function main() {
   const filmFoam = new FoamSim(device, waveCommonCode + filmFoamCode, [128, 256])
   const oceanCodeFull = atmosphereCode + waveCommonCode + oceanCode
   const buildOcean = q => new Ocean(device, oceanCodeFull, waveField.texture, capField.texture,
-    foam.views, filmFoam.views, foamPattern, foamPlates, chain.view, chain.coastView, format,
+    foam.views, filmFoam.views, foamPattern, foamPlates, chain.view, chain.coastView,
+    coast.sdfView, coast.mainTableView, format,
     { gridN: QUALITY[q].gridN, ribbonCells: QUALITY[q].ribbonCells,
       cell: QUALITY[q].cell, linearCells: QUALITY[q].linearCells })
   let ocean = buildOcean('high')
-  foam.bind(ocean.uniform, waveField.texture, null)
-  filmFoam.bind(ocean.uniform, null, chain.view)
+  foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
+  filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
   const reportFPS = setupFPS()
   const timer = new GPUTimer(device, timestamps, ['refract', 'scene'])
-  camera.floor = (x, z) => terrainHeightAt(x, z, params.depth)
+  // Same expression as terrainHeight() in wave_common.wgsl, over the same
+  // baked coastline the shader samples, so the floor the camera stops at is
+  // the floor that gets drawn
+  camera.floor = (x, z) => Math.min(Math.max(SLOPE * coast.sdfAt(x, z), -params.depth), 3)
   setupNoiseDebug([
     ...noise.variants.map(v => ({ name: v.name, size: noise.size, channels: v.channels })),
     { name: 'capillary', size: capNoise.size, channels: capNoise.channels },
@@ -124,8 +128,8 @@ async function main() {
       builtQuality = params.quality
       ocean = buildOcean(builtQuality)
       ocean.chain = chain
-      foam.bind(ocean.uniform, waveField.texture, null)
-      filmFoam.bind(ocean.uniform, null, chain.view)
+      foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
+      filmFoam.bind(ocean.uniform, null, chain.view, null)
       if (targets) ocean.setRefractionTarget(targets.refrColor.createView())
     }
 

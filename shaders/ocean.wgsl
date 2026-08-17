@@ -8,8 +8,9 @@
 @group(0) @binding(8) var coastTex: texture_2d<f32>;
 // Linear radiance of the submerged scene, rendered in its own pass. rgb is the
 // lit floor, a is a submerged mask used to reject taps that land above water.
-@group(0) @binding(9) var refrTex: texture_2d<f32>;
-@group(0) @binding(10) var refrSamp: sampler;
+// 9 and 10 belong to the coastline SDF and the mainland table
+@group(0) @binding(11) var refrTex: texture_2d<f32>;
+@group(0) @binding(12) var refrSamp: sampler;
 @group(1) @binding(0) var filmFoamTex: texture_2d<f32>;
 
 struct VSOut {
