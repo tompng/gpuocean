@@ -30,7 +30,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let sNow = simRestS(b) + sim.x;
   let sb = simBlend(b);
   let inFilm = sb * (1.0 - smoothstep(sim.z - 0.3, sim.z + 0.1, sNow));
-  let gen = inFilm * smoothstep(0.25, 0.7, compress);
+  let gen = inFilm * smoothstep(0.25, 0.7, compress) * smoothstep(0.0, 8.0, b);
   // Foam on the beach face is swallowed where the waves flood over it again
   let sJ = -REST_DEPTH / u.slope + simState(0.0, col).x;
   let tyM = u.slope * simRestS(b);
