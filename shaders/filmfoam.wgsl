@@ -26,7 +26,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let sim = simState(b, col);
   let e = 0.8;
   let restScale = REST_DEPTH / u.slope / SIM_SPAN;
-  let compress = (simState(b - e, col).x - simState(b + e, col).x) / (2.0 * e * restScale);
+  // clamp the FD window to the chain's domain but divide by the ACTUAL
+  // span — a fixed 2e denominator halves the measured compression right
+  // at the junction, where the drive's compression enters the film
+  let b0 = max(b - e, 0.0);
+  let b1 = min(b + e, SIM_SPAN);
+  let compress = (simState(b0, col).x - simState(b1, col).x) / (max(b1 - b0, 0.01) * restScale);
   let sNow = simRestS(b) + sim.x;
   let sb = simBlend(b);
   let inFilm = sb * (1.0 - smoothstep(sim.z - 0.3, sim.z + 0.1, sNow));
