@@ -188,7 +188,15 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   let w = sampleWaves(matWorld, cellW);
   let sb = simBlend(b);
   let chain = simState(b, col);
-  let chainWorld = coastP + coastN * (simRestS(b) + chain.x);
+  let chainJ = simState(0.0, col);
+  // Near the junction the film renders as the rest profile TRANSLATED by
+  // the junction displacement, blending to the true node positions over
+  // the same band where world foam hands over to film foam. The chain's
+  // local stretch would otherwise breathe the display scale of anything
+  // anchored in rest coordinates by several times; a translation keeps
+  // that scale constant, and the interior keeps the full compression.
+  let wS = smoothstep(0.0, 12.0, b);
+  let chainWorld = coastP + coastN * (simRestS(b) + mix(chainJ.x, chain.x, wS));
   let dispXZ = mix(matWorld + w.disp, chainWorld, sb);
   let ty = terrainHeight(dispXZ);
   // The wave height carries at full strength up to the handover — the sb
@@ -202,7 +210,7 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   // (the blend ramp) the terrain keeps dropping while the column stays at
   // the junction value, so clamp the film's terrain at the junction's —
   // the extrapolation is then flat at sea level instead of sagging below
-  let sJ = -REST_DEPTH / u.slope + simState(0.0, col).x;
+  let sJ = -REST_DEPTH / u.slope + chainJ.x;
   let tyJ = u.slope * sJ;
   let tyF = max(ty, tyJ);
   // The junction column is NOT its depth below the static z=0 level: the
@@ -228,8 +236,8 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VS
   out.st = vec2f(b, col);
   out.waveXZ = mix(matWorld, coastP + coastN * simRestS(b), sb);
   let eS = 1.0;
-  out.stretch = abs(simRestS(b + eS) + simState(b + eS, col).x
-                  - (simRestS(b - eS) + simState(b - eS, col).x)) / (2.0 * eS);
+  out.stretch = abs(simRestS(b + eS) + mix(chainJ.x, simState(b + eS, col).x, smoothstep(0.0, 12.0, b + eS))
+                  - (simRestS(b - eS) + mix(chainJ.x, simState(b - eS, col).x, smoothstep(0.0, 12.0, b - eS)))) / (2.0 * eS);
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
@@ -387,8 +395,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let r = reflect(-v, n);
   let spec = sunTint(u.sunDir) * (mix(8.0, 4.5, sunWarmth(u.sunDir)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
   let fCenter = vec2f(u.foamCX, u.foamCZ);
-  let fuv = (in.gridXZ - fCenter) / (2.0 * u.foamRegion) + 0.5;
-  let edgeFade = 1.0 - smoothstep(0.85, 1.0, length(in.gridXZ - fCenter) / u.foamRegion);
+  // World foam anchors at waveXZ, not gridXZ: identical on the open grid,
+  // but on the film gridXZ is the 28m material band (a 14x metric mismatch
+  // that squashed world foam into streaks) while waveXZ is the rest-matched
+  // position — world metric at rest, advecting with the material, and
+  // already blended continuously into matWorld across the handover band.
+  let fuv = (in.waveXZ - fCenter) / (2.0 * u.foamRegion) + 0.5;
+  let edgeFade = 1.0 - smoothstep(0.85, 1.0, length(in.waveXZ - fCenter) / u.foamRegion);
   let foamRaw = textureSample(foamTex, samp, fuv).rgb;
   let foamAcc = foamRaw * edgeFade;
   // Beyond the window the buffer fades out; an instantaneous stand-in from
@@ -479,7 +492,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Eroding a single pattern at blended coordinates smears it into
   // streaks across the handover where the frames diverge.
   let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
-  let patWave = textureSample(foamPatTex, samp, in.gridXZ / (5.0 * u.foamScale)).r;
+  let patWave = textureSample(foamPatTex, samp, in.waveXZ / (5.0 * u.foamScale)).r;
   // Over-compressed foam filaments merge instead of thinning forever: as
   // the film compresses, blend toward a pattern that is coarser in the
   // cross-shore direction only, so the rendered streaks stop shrinking
@@ -487,7 +500,14 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let patFine = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 3.0, patFilmUV.y)).r;
   let patCoarse = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 9.0, patFilmUV.y)).r;
   let patFilm = mix(patFine, patCoarse, 1.0 - smoothstep(0.07, 0.4, in.stretch));
-  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR));
+  // Crossfade across the junction: the world foam fades out landward over
+  // the band where the film's generation ramps in, so the two systems hand
+  // over without a foamless gap (grid fragments park st.x far negative and
+  // keep the full value). The fade scales the accumulation BEFORE the
+  // threshold — like foam decay, it erodes the pattern into clumps — so
+  // foam stays binary white instead of turning translucent.
+  let junctionFade = 1.0 - smoothstep(0.0, 6.0, in.st.x);
+  let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR * junctionFade));
   let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * (filmAcc.b + filmAcc.r * 0.8)));
   // the masks are thresholded 0/1 fields, so foam is present when either
   // system says so — a blend would half-fade both across the handover
