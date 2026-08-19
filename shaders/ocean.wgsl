@@ -508,7 +508,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // foam stays binary white instead of turning translucent.
   let junctionFade = 1.0 - smoothstep(0.0, 6.0, in.st.x);
   let maskWave = smoothstep(0.0, 0.15, patWave - (1.05 - 1.15 * accR * junctionFade));
-  let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * (filmAcc.b + filmAcc.r * 0.8)));
+  // Foam only rides actual water: as the column thins below the wet
+  // threshold — the same band where the fresnel reflection dies — the
+  // erosion eats the foam into clumps, so it never climbs bare sand ahead
+  // of the film
+  let wetAcc = (filmAcc.b + filmAcc.r * 0.8) * smoothstep(0.02, 0.08, column);
+  let maskFilm = smoothstep(0.0, 0.15, patFilm - (1.05 - 1.15 * wetAcc));
   // the masks are thresholded 0/1 fields, so foam is present when either
   // system says so — a blend would half-fade both across the handover
   let foamMask = min(maskWave + maskFilm, 1.0);
