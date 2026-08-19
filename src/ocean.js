@@ -1,4 +1,5 @@
 import { SLOPE } from './chain.js'
+import { COPY_RATIO } from './noise.js'
 
 const GRAVITY = 9.81
 const ISLAND_COLS = 96
@@ -11,7 +12,11 @@ const GRID_N = 512
 const CELL = 0.4
 const LINEAR_CELLS = 160
 const CELL_GROWTH = 1.12
-const SCALE_RATIO = 0.68
+// Five layers x five copies span the old 8-layer component range as a
+// fixed geometric comb; a lower layer count truncates the comb from the
+// long-wavelength end (the finest bands go first) instead of stretching
+// the spacing, so partial counts stay coherent
+const LAYER_RATIO = (0.68 ** 7 / COPY_RATIO ** 4) ** 0.25
 const MAX_LAYERS = 8
 const DIR_FRACS = [0, 0.9, -0.75, 0.45, -0.35, 0.7, -1, 0.2]
 const UV_OFFSETS = [
@@ -175,24 +180,25 @@ export class Ocean {
     u[27] = noise.size
 
     const spread = params.spread * Math.PI / 180
+    const ratio = LAYER_RATIO
     let sq = 0
-    for (let i = 0; i < count; i++) sq += SCALE_RATIO ** (2 * i)
+    for (let i = 0; i < count; i++) sq += ratio ** (2 * i)
     // amp_i ∝ λ_i keeps per-layer steepness constant; total variance = amplitude^2
     const ampNorm = params.amplitude / Math.sqrt(sq)
     let meanX = 0
     let meanZ = 0
     for (let i = 0; i < count; i++) {
-      const lambda = params.wavelength * SCALE_RATIO ** i
+      const lambda = params.wavelength * ratio ** i
       const tile = lambda * noise.wavesPerTile
       this.phases[i] += Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / tile * dt
       const angle = params.waveDir * Math.PI / 180 + DIR_FRACS[i] * spread
-      meanX += SCALE_RATIO ** (2 * i) * Math.cos(angle)
-      meanZ += SCALE_RATIO ** (2 * i) * Math.sin(angle)
+      meanX += ratio ** (2 * i) * Math.cos(angle)
+      meanZ += ratio ** (2 * i) * Math.sin(angle)
       const o = 32 + i * 8
       u[o] = Math.cos(angle)
       u[o + 1] = Math.sin(angle)
       u[o + 2] = 1 / tile
-      u[o + 3] = ampNorm * SCALE_RATIO ** i
+      u[o + 3] = ampNorm * ratio ** i
       u[o + 4] = UV_OFFSETS[i][0] - this.phases[i]
       u[o + 5] = UV_OFFSETS[i][1]
       u[o + 6] = 0

@@ -11,24 +11,25 @@ import { floatToHalf } from './gpu.js'
 // parameter with exact tiling: the transfer is evaluated at frequencies
 // rotated by the variant's angle, and the displacement cumsum divides by
 // 1 - e^{-iω} along the rotated travel axis. Five independent variants
-// (0, ±5, ±10 degrees) feed the wave field's five scrolled copies. The ±10
-// cap keeps a single-swell look reachable: the copies fill a layer's ±10
-// fan seamlessly, and the layer spread then slides whole fans apart.
-// Many distinct orientations also mask the tile repetition, which is what
-// allows the smaller texture (repeat length halves against 512).
-const VARIANT_ANGLES = [-10, -5, 0, 5, 10].map(a => a * Math.PI / 180)
-const VARIANT_SEEDS = [23456, 45678, 12345, 34567, 56789]
+// (rotations within ±10 degrees — the cap keeps a single-swell look
+// reachable) feed the wave field's five scrolled copies. Each variant is
+// also baked COPY_RATIO^k FINER than the last, so one composited texture
+// carries a five-step geometric comb of bands: the renderer's layer ratio
+// then spreads whole combs across a FIXED total range, making the layer
+// count a comb-density (quality) knob instead of a bandwidth knob.
+export const COPY_RATIO = 0.87
+const VARIANT_ANGLES = [0, -10, 10, -5, 5].map(a => a * Math.PI / 180)
+const VARIANT_SEEDS = [12345, 23456, 34567, 45678, 56789]
 
 export function generateGravityNoiseSet(device, opts = {}) {
   const size = opts.size ?? 256
-  const angles = opts.angles ?? VARIANT_ANGLES
-  const variants = angles.map((angle, i) =>
-    gravityChannels(size, opts, VARIANT_SEEDS[i], angle))
-  // one dispGradPerTexel serves all variants, so every d channel divides by
-  // the SAME sigma (the straight variant's); the ~1% per-variant variance
-  // difference is harmless, a mismatched gradient scale is not
-  const center = angles.indexOf(0)
-  const sigmaD = variants[center].sigmaD
+  const variants = VARIANT_ANGLES.map((angle, k) =>
+    gravityChannels(size, opts, VARIANT_SEEDS[k], angle, COPY_RATIO ** k))
+  // every d channel divides by the COARSEST variant's sigma: the cumsum's
+  // 1/k gain then already carries each finer band's physical displacement
+  // ratio, and a single dispGradPerTexel keeps the shader's
+  // height-to-displacement link exact for every copy
+  const sigmaD = variants[0].sigmaD
   const textures = []
   const heights = []
   for (const v of variants) {
@@ -37,24 +38,32 @@ export function generateGravityNoiseSet(device, opts = {}) {
     textures.push(createNoiseTexture(device, size, v.h, v.d, hx, hy))
     heights.push(v.h)
   }
-  const [hx0] = gradients(variants[center].h, size)
+  const [hx0] = gradients(variants[0].h, size)
+  const wRaw = VARIANT_ANGLES.map((_, k) => COPY_RATIO ** k)
+  const wSum = Math.sqrt(wRaw.reduce((a, w) => a + w * w, 0))
   return {
     textures,
     size,
-    wavesPerTile: wavesPerTile(variants[center].h, hx0, size),
+    wavesPerTile: wavesPerTile(variants[0].h, hx0, size),
     dispGradPerTexel: -1 / sigmaD,
     heights,
-    variants: angles.map((angle, i) => ({
-      name: `gravity ${Math.round(angle * 180 / Math.PI)}deg`,
-      channels: { height: variants[i].h, disp: variants[i].d },
+    // amplitude ∝ wavelength across the comb keeps per-band steepness
+    // constant; unit total variance keeps the per-layer amplitude math
+    copyWeights: wRaw.map(w => w / wSum),
+    // relative scroll speeds from the dispersion relation, evaluated at the
+    // base wavelength; the layer's own scroll carries the common part
+    copySpeeds: VARIANT_ANGLES.map((_, k) => Math.sqrt(COPY_RATIO ** k) - 1),
+    variants: VARIANT_ANGLES.map((angle, k) => ({
+      name: `gravity ${Math.round(angle * 180 / Math.PI)}deg x${(COPY_RATIO ** k).toFixed(2)}`,
+      channels: { height: variants[k].h, disp: variants[k].d },
     })),
   }
 }
 
-function gravityChannels(size, opts, seed, angle) {
-  const sigmaAlong = opts.sigmaAlong ?? 3
-  const sigmaAlongWide = opts.sigmaAlongWide ?? 9
-  const sigmaCross = opts.sigmaCross ?? 14
+function gravityChannels(size, opts, seed, angle, scale) {
+  const sigmaAlong = (opts.sigmaAlong ?? 3) * scale
+  const sigmaAlongWide = (opts.sigmaAlongWide ?? 9) * scale
+  const sigmaCross = (opts.sigmaCross ?? 14) * scale
   const random = mulberry32(seed)
 
   const n = size * size

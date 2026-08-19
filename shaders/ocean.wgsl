@@ -66,6 +66,11 @@ struct WaveSample {
   disp: vec2f,
 }
 
+// the composited texture carries a five-copy sub-comb; its finest copy is
+// COPY_RATIO^4 finer than the layer's nominal band, and the anti-alias
+// attenuations key on that finest content
+const COPY_FINE: f32 = 1.75;
+
 fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
   var height = 0.0;
   var disp = vec2f(0.0);
@@ -77,7 +82,7 @@ fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
     // The cutoff sits well below the band's Nyquist (~14 texels): with
     // fewer than ~5 vertices per wave the geometry reads as polygons, so
     // the height dies early and the fragment normals carry the detail.
-    let att = 1.0 - smoothstep(2.0, 6.0, cell * l.dirScaleAmp.z * u.hGrad);
+    let att = 1.0 - smoothstep(2.0, 6.0, cell * l.dirScaleAmp.z * u.hGrad * COPY_FINE);
     let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
     height += l.dirScaleAmp.w * s.x * att;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y * att) * l.dirScaleAmp.xy;
@@ -304,7 +309,7 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
     let l = u.layers[i];
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
-    let amp = l.dirScaleAmp.w * (1.0 - smoothstep(5.0, 14.0, mpp * l.dirScaleAmp.z * u.hGrad));
+    let amp = l.dirScaleAmp.w * (1.0 - smoothstep(5.0, 14.0, mpp * l.dirScaleAmp.z * u.hGrad * COPY_FINE));
     let s = textureSample(waveTex, samp, layerUV(xz, i));
     let duvdx = vec2f(dir.x, -dir.y) * invL;
     let duvdz = vec2f(dir.y, dir.x) * invL;
@@ -346,7 +351,7 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
       amp = isoScale * l.dirScaleAmp.w * u.capHGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.capHGrad));
     } else {
       s = textureSample(waveTex, samp, uvc);
-      amp = anisoScale * l.dirScaleAmp.w * u.hGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.hGrad));
+      amp = anisoScale * l.dirScaleAmp.w * u.hGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.hGrad * COPY_FINE));
     }
     let grad = vec2f(s.z, s.w) * amp;
     dPx.y += dot(grad, vec2f(dir.x, -dir.y) * invL);

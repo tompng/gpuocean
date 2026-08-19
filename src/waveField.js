@@ -1,6 +1,13 @@
-// Step 1: blend a few copies of the noise texture scrolling at different speeds
-// into one texture per frame, approximating in-band dispersion.
+// Step 1: blend the noise copies scrolling at different speeds into one
+// texture per frame. A comb noise set supplies its own physical per-copy
+// speeds and weights; single-texture noises (capillary) fall back to these
+// in-band dispersion-approximation factors and uniform weights.
 const COPY_FACTORS = [-0.65, -0.3, 0.1, 0.4, 0.7]
+// Artificial speed spread scaled by the dispersion parameter: physical
+// speed differences between neighbouring comb bands are only a few percent,
+// which reads as frozen patterns. Zero mean under the copies' variance
+// weights, so the spread never shifts the apparent propagation speed.
+const DISPERSION_JITTER = [0.55, -0.45, 0.3, -0.6, -0.37]
 // Crest-parallel drift: advances oblique spectral components differently from
 // straight-ahead ones, imitating directional dispersion within one layer
 const COPY_FACTORS_Y = [0.5, -0.35, -0.65, 0.2, 0.35]
@@ -46,6 +53,9 @@ export class WaveField {
       ],
     })
 
+    this.base = noise.copySpeeds ?? COPY_FACTORS.map(() => 0)
+    this.jitter = noise.copySpeeds ? DISPERSION_JITTER : COPY_FACTORS
+    this.weights = noise.copyWeights ?? COPY_FACTORS.map(() => 1 / Math.sqrt(COPY_FACTORS.length))
     this.phases = COPY_FACTORS.map(() => 0)
     this.phasesY = COPY_FACTORS.map(() => 0)
     this.data = new Float32Array(COPY_FACTORS.length * 4)
@@ -53,11 +63,10 @@ export class WaveField {
 
   // texFreq: scroll speed in tiles per second matching the texture's dominant wave
   update(dt, texFreq, dispersion) {
-    const weight = 1 / Math.sqrt(COPY_FACTORS.length)
     for (let i = 0; i < COPY_FACTORS.length; i++) {
-      this.phases[i] += COPY_FACTORS[i] * dispersion * texFreq * dt
+      this.phases[i] += (this.base[i] + dispersion * this.jitter[i]) * texFreq * dt
       this.phasesY[i] += COPY_FACTORS_Y[i] * dispersion * texFreq * dt
-      this.data.set([COPY_OFFSETS[i][0] - this.phases[i], COPY_OFFSETS[i][1] - this.phasesY[i], weight, 0], i * 4)
+      this.data.set([COPY_OFFSETS[i][0] - this.phases[i], COPY_OFFSETS[i][1] - this.phasesY[i], this.weights[i], 0], i * 4)
     }
     this.device.queue.writeBuffer(this.uniform, 0, this.data)
   }
