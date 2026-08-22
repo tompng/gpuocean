@@ -32,7 +32,7 @@ async function main() {
   const chain = new ChainSim(device, coast)
   const filmFoam = new FoamSim(device, waveCommonCode + filmFoamCode, [128, 256])
   const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, format)
-  foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
+  foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView, ocean.diskBuffer)
   filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
   ocean.coast = coast

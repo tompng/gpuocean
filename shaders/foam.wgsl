@@ -16,7 +16,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
 
 // Horizontal-map Jacobian and height of the displaced surface, the Jacobian
 // terms matching the ocean shader's surfaceNormal
-fn waveSurface(xz: vec2f) -> vec2f {
+fn waveSurface(xz: vec2f, ampMul: f32) -> vec2f {
   var dxx = 1.0;
   var dxz = 0.0;
   var dzx = 0.0;
@@ -27,7 +27,7 @@ fn waveSurface(xz: vec2f) -> vec2f {
     let l = u.layers[i];
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
-    let amp = l.dirScaleAmp.w;
+    let amp = l.dirScaleAmp.w * ampMul;
     let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
     let duvdx = vec2f(dir.x, -dir.y) * invL;
     let duvdz = vec2f(dir.y, dir.x) * invL;
@@ -56,7 +56,7 @@ fn waveSurface(xz: vec2f) -> vec2f {
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let xz = vec2f(u.foamCX, u.foamCZ) + (in.uv - 0.5) * (2.0 * u.foamRegion);
-  let s = waveSurface(xz);
+  let s = waveSurface(xz, diskAmpAll(xz));
   let jac = s.x;
   let ty = terrainHeight(xz);
   // The ghost wave field extends over dry land; only actually submerged
