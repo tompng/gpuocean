@@ -133,9 +133,7 @@ struct TileIn {
   @location(1) tile: vec3f,
 }
 
-@vertex
-fn vs_grid(in: TileIn) -> VSOut {
-  let xz = (in.tile.xy * TILE_K + in.local) * in.tile.z;
+fn openWaterVertex(xz: vec2f) -> VSOut {
   let w = sampleWaves(xz);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
@@ -156,6 +154,30 @@ fn vs_grid(in: TileIn) -> VSOut {
   out.stretch = 1.0;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
+}
+
+@vertex
+fn vs_grid(in: TileIn) -> VSOut {
+  return openWaterVertex((in.tile.xy * TILE_K + in.local) * in.tile.z);
+}
+
+// Zero-width wall along a level boundary. At a 2:1 T-junction the crack
+// between the fine polyline and the coarse chord is exactly the triangle
+// spanned by two shared corner vertices and the fine midpoint, all with
+// the full displacement — so one such triangle per fine vertex pair,
+// instanced along every boundary edge, closes the seam in all three
+// coordinates. Drawn without culling: the crack faces either way.
+struct WallIn {
+  @location(0) along: f32,
+  // edge origin in the fine level's lattice units (integer-valued), the
+  // fine cell size, and the axis flag (0: along +x, 1: along +z)
+  @location(1) inst: vec4f,
+}
+
+@vertex
+fn vs_wall(in: WallIn) -> VSOut {
+  let axis = select(vec2f(1.0, 0.0), vec2f(0.0, 1.0), in.inst.w > 0.5);
+  return openWaterVertex((in.inst.xy + axis * in.along) * in.inst.z);
 }
 
 // ribbon row pitch (28m band / 140 cells); the skirt spans two rows

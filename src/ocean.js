@@ -16,6 +16,7 @@ const TILE_K = 16
 const TILE_CELLS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 const MAX_DIST = 8000
 const MAX_TILES = 4096
+const MAX_WALLS = 4096
 const distForCell = c => 32 + (c - 0.25) / 0.08
 const CELL = 0.4
 const LINEAR_CELLS = 160
@@ -178,6 +179,35 @@ export class Ocean {
     })
     this.waterInstData = new Float32Array(MAX_TILES * 3)
     this.landInstData = new Float32Array(MAX_TILES * 3)
+    // level-boundary walls: crack faces either way, so no culling
+    const wallVertex = entryPoint => ({
+      module,
+      entryPoint,
+      buffers: [
+        {
+          arrayStride: 4,
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32' }],
+        },
+        {
+          arrayStride: 16,
+          stepMode: 'instance',
+          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }],
+        },
+      ],
+    })
+    this.fillWallPipeline = device.createRenderPipeline({
+      ...base,
+      vertex: wallVertex('vs_wall'),
+      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+    })
+    this.wallVertexBuffer = createVertexBuffer(device, buildWallVertices(TILE_K))
+    this.wallVertCount = (TILE_K / 2) * 3
+    this.wallInst = device.createBuffer({
+      size: MAX_WALLS * 16,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    this.wallInstData = new Float32Array(MAX_WALLS * 4)
 
     const [ribTri, ribLine] = buildIndices(RIBBON_CELLS, this.gridN)
     this.ribbonTriIndices = createIndexBuffer(device, ribTri)
@@ -310,7 +340,7 @@ export class Ocean {
     u[164] = params.foamScale
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
-    const [waterCount, landCount] = this.updateTileInstances(eye, viewProj, params)
+    const [waterCount, landCount, wallCount] = this.updateTileInstances(eye, viewProj, params)
     const wire = params.wireframe
     pass.setBindGroup(0, this.bindGroups[foamIndex])
     pass.setBindGroup(1, this.filmGroups[filmIndex])
@@ -333,6 +363,12 @@ export class Ocean {
     pass.setVertexBuffer(1, this.landInst)
     pass.setIndexBuffer(wire ? this.tileLineIndices : this.tileTriIndices, 'uint32')
     pass.drawIndexed(wire ? this.tileLineCount : this.tileTriCount, landCount)
+    if (!wire && wallCount > 0) {
+      pass.setPipeline(this.fillWallPipeline)
+      pass.setVertexBuffer(0, this.wallVertexBuffer)
+      pass.setVertexBuffer(1, this.wallInst)
+      pass.draw(this.wallVertCount, wallCount)
+    }
   }
 
   // World-anchored tile rings: level L covers the square annulus between
@@ -352,6 +388,7 @@ export class Ocean {
     const sdf = this.coast.sampleSDF
     let water = 0
     let land = 0
+    let walls = 0
     let inner = null
     for (let l = 0; l < TILE_CELLS.length; l++) {
       const cell = TILE_CELLS[l]
@@ -386,11 +423,35 @@ export class Ocean {
           }
         }
       }
+      // walls close the T-junction cracks along this level's outer
+      // boundary, where the next (coarser) level takes over
+      if (!isLast) {
+        for (let x = x0; x < x1; x += span) {
+          walls = this.pushWall(walls, x, z0, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf)
+          walls = this.pushWall(walls, x, z1, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf)
+        }
+        for (let z = z0; z < z1; z += span) {
+          walls = this.pushWall(walls, x0, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf)
+          walls = this.pushWall(walls, x1, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf)
+        }
+      }
       inner = [x0, z0, x1, z1]
     }
     this.device.queue.writeBuffer(this.waterInst, 0, this.waterInstData, 0, water * 3)
     this.device.queue.writeBuffer(this.landInst, 0, this.landInstData, 0, land * 3)
-    return [water, land]
+    this.device.queue.writeBuffer(this.wallInst, 0, this.wallInstData, 0, walls * 4)
+    return [water, land, walls]
+  }
+
+  pushWall(count, x, z, span, cell, axis, planes, pad, yMin, yMax, cutSDF, sdf) {
+    if (count >= MAX_WALLS) return count
+    const x1 = axis === 0 ? x + span : x
+    const z1 = axis === 0 ? z : z + span
+    if (!boxVisible(planes, Math.min(x, x1) - pad, yMin, Math.min(z, z1) - pad, Math.max(x, x1) + pad, yMax, Math.max(z, z1) + pad)) return count
+    const sMin = Math.min(sdf(x, z), sdf(x1, z1), sdf((x + x1) / 2, (z + z1) / 2))
+    if (sMin - span / 2 > cutSDF) return count
+    this.wallInstData.set([x / cell, z / cell, cell, axis], count * 4)
+    return count + 1
   }
 }
 
@@ -412,6 +473,19 @@ function buildTileVertices(k) {
       data[p++] = ix
       data[p++] = iz
     }
+  }
+  return data
+}
+
+// One crack triangle per fine vertex pair along a tile edge: positions
+// are the along-edge lattice offsets (even, odd, even)
+function buildWallVertices(k) {
+  const data = new Float32Array((k / 2) * 3)
+  let p = 0
+  for (let j = 0; j < k / 2; j++) {
+    data[p++] = 2 * j
+    data[p++] = 2 * j + 1
+    data[p++] = 2 * j + 2
   }
   return data
 }
