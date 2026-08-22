@@ -1,4 +1,4 @@
-import { SLOPE, REST_DEPTH } from './chain.js'
+import { SLOPE, REST_DEPTH, sampleWaveLevel } from './chain.js'
 import { COPY_RATIO } from './noise.js'
 
 const GRAVITY = 9.81
@@ -17,7 +17,8 @@ const TILE_CELLS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 const MAX_DIST = 8000
 const MAX_TILES = 4096
 const MAX_WALLS = 4096
-const MAX_DISKS = 64
+// the packed list handle keeps 6 bits for the count, so at most 63 disks
+const MAX_DISKS = 63
 const MAX_DISK_LIST = 16384
 const distForCell = c => 32 + (c - 0.25) / 0.08
 const CELL = 0.4
@@ -72,8 +73,8 @@ export class Ocean {
         { binding: 8, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 10, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
-        { binding: 11, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-        { binding: 12, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 11, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+        { binding: 12, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     })
     const filmLayout = device.createBindGroupLayout({
@@ -145,14 +146,14 @@ export class Ocean {
     // after the 16-aligned count field)
     this.disks = []
     this.diskBuffer = device.createBuffer({
-      size: 16 + MAX_DISKS * 32,
+      size: 16 + MAX_DISKS * 48,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
     this.diskListBuffer = device.createBuffer({
       size: MAX_DISK_LIST * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
-    this.diskData = new Float32Array(4 + MAX_DISKS * 8)
+    this.diskData = new Float32Array(4 + MAX_DISKS * 12)
     this.diskCountData = new Uint32Array(this.diskData.buffer, 0, 1)
     this.diskListData = new Uint32Array(MAX_DISK_LIST)
     const sampler = device.createSampler({
@@ -365,7 +366,7 @@ export class Ocean {
     u[164] = params.foamScale
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
-    const [waterCount, landCount, wallCount] = this.updateTileInstances(eye, viewProj, params)
+    const [waterCount, landCount, wallCount] = this.updateTileInstances(eye, viewProj, params, noise, dt)
     const wire = params.wireframe
     pass.setBindGroup(0, this.bindGroups[foamIndex])
     pass.setBindGroup(1, this.filmGroups[filmIndex])
@@ -403,12 +404,26 @@ export class Ocean {
   // frustum-tested and classified by the coast SDF: fully-land tiles skip
   // the water set (every fragment would be cut), deep-sea tiles skip the
   // land set (terrain can never rise above any visible water surface).
-  updateTileInstances(eye, viewProj, params) {
+  updateTileInstances(eye, viewProj, params, noise, dt) {
     const planes = frustumPlanes(viewProj)
     const disks = this.disks.slice(0, MAX_DISKS)
-    // amp-raising disks push the surface above the global amplitude's
-    // bounds, so the culling boxes widen by the largest multiplier
-    const ampMax = disks.reduce((m, d) => Math.max(m, d.amp), 1) * params.amplitude
+    // amp-raising disks and added bands push the surface above the global
+    // amplitude's bounds, so the culling boxes widen accordingly
+    let addAmpSum = 0
+    disks.forEach((d, i) => {
+      let layer = null
+      if (d.waveAmp) {
+        d.phase = (d.phase ?? 0) + Math.sqrt(GRAVITY * d.wavelength / (2 * Math.PI)) / (d.wavelength * noise.wavesPerTile) * dt
+        layer = this.diskLayer(d, i, noise)
+        addAmpSum += d.waveAmp
+      }
+      this.diskData.set([
+        d.x, d.z, d.rIn, d.rOut,
+        d.amp ?? 1, d.waveAmp ?? 0, layer?.dx ?? 1, layer?.dz ?? 0,
+        layer?.invL ?? 0, layer?.su ?? 0, layer?.sv ?? 0, 0,
+      ], 4 + i * 12)
+    })
+    const ampMax = disks.reduce((m, d) => Math.max(m, d.amp ?? 1), 1) * params.amplitude + addAmpSum
     const pad = 4 * ampMax + 2
     const yMin = -params.depth - 3
     const yMax = 3.5 + 4 * ampMax
@@ -416,14 +431,15 @@ export class Ocean {
     const landSDF = -(4 * ampMax + 1) / SLOPE
     const sdf = this.coast.sampleSDF
     this.diskCountData[0] = disks.length
-    disks.forEach((d, i) => this.diskData.set([d.x, d.z, d.rIn, d.rOut, d.amp, 0, 0, 0], 4 + i * 8))
-    this.device.queue.writeBuffer(this.diskBuffer, 0, this.diskData, 0, 4 + disks.length * 8)
+    this.device.queue.writeBuffer(this.diskBuffer, 0, this.diskData, 0, 4 + disks.length * 12)
     // Disk-list handle for one rect, packed as base * 64 + count. The test
     // is purely geometric (rOut circle vs rect): a disk left out of a
     // neighbouring rect's list has exactly zero influence on the shared
     // edge, so differing lists still agree bitwise at shared vertices —
-    // which any value-based pruning would break.
-    let listLen = 0
+    // which any value-based pruning would break. The identity prefix is
+    // the ribbons' list: their handle is just the disk count.
+    let listLen = disks.length
+    disks.forEach((d, i) => { this.diskListData[i] = i })
     const diskListFor = (x0, z0, x1, z1) => {
       const base = listLen
       for (const [i, d] of disks.entries()) {
@@ -503,14 +519,44 @@ export class Ocean {
     return count + 1
   }
 
-  // CPU replica of the shader's disk modulation, for the chain drive
+  // A disk's added band as a pseudo-layer in the CPU layerCache format,
+  // shared between the GPU record and the chain-drive replica
+  diskLayer(d, i, noise) {
+    const a = (d.waveDir ?? 0) * Math.PI / 180
+    const off = UV_OFFSETS[i % UV_OFFSETS.length]
+    return {
+      dx: Math.cos(a),
+      dz: Math.sin(a),
+      invL: 1 / (d.wavelength * noise.wavesPerTile),
+      amp: d.waveAmp,
+      su: off[0] - (d.phase ?? 0),
+      sv: off[1],
+    }
+  }
+
+  diskFalloff(d, x, z) {
+    const t = Math.min(Math.max((Math.hypot(x - d.x, z - d.z) - d.rIn) / (d.rOut - d.rIn), 0), 1)
+    return 1 - t * t * (3 - 2 * t)
+  }
+
+  // CPU replicas of the shader's disk modulation, for the chain drive
   diskAmpAt(x, z) {
     let m = 1
     for (const d of this.disks) {
-      const t = Math.min(Math.max((Math.hypot(x - d.x, z - d.z) - d.rIn) / (d.rOut - d.rIn), 0), 1)
-      m *= 1 + (d.amp - 1) * (1 - t * t * (3 - 2 * t))
+      m *= 1 + ((d.amp ?? 1) - 1) * this.diskFalloff(d, x, z)
     }
     return m
+  }
+
+  diskWaveLevel(x, z, noise, waveField) {
+    let sum = 0
+    this.disks.forEach((d, i) => {
+      if (!d.waveAmp) return
+      const w = this.diskFalloff(d, x, z)
+      if (w === 0) return
+      sum += w * sampleWaveLevel(x, z, noise, waveField, [this.diskLayer(d, i, noise)])
+    })
+    return sum
   }
 }
 

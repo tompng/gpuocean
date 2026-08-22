@@ -16,13 +16,37 @@ fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
 
 // Horizontal-map Jacobian and height of the displaced surface, the Jacobian
 // terms matching the ocean shader's surfaceNormal
-fn waveSurface(xz: vec2f, ampMul: f32) -> vec2f {
+fn waveSurface(xz: vec2f) -> vec2f {
   var dxx = 1.0;
   var dxz = 0.0;
   var dzx = 0.0;
   var dzz = 1.0;
   var height = 0.0;
   var gradH = vec2f(0.0);
+  // region disks: the multiplier scales the global layers below, the
+  // added bands accumulate their own terms directly
+  var ampMul = 1.0;
+  for (var i = 0u; i < diskBuf.count; i++) {
+    let d = diskBuf.data[i];
+    let w = diskWeight(d, xz);
+    ampMul *= mix(1.0, d.mods.x, w);
+    let amp = w * d.mods.y;
+    if (amp > 0.0) {
+      let dir = d.mods.zw;
+      let invL = d.wave.x;
+      let s = textureSampleLevel(waveTex, samp, diskUV(d, xz), 0.0);
+      let duvdx = vec2f(dir.x, -dir.y) * invL;
+      let duvdz = vec2f(dir.y, dir.x) * invL;
+      let grad = vec2f(s.z, s.w) * u.hGrad;
+      let dDdu = u.choppiness * amp * s.x * u.dGrad;
+      height += amp * s.x;
+      gradH += amp * vec2f(dot(grad, duvdx), dot(grad, duvdz));
+      dxx += dir.x * dDdu * duvdx.x;
+      dxz += dir.y * dDdu * duvdx.x;
+      dzx += dir.x * dDdu * duvdz.x;
+      dzz += dir.y * dDdu * duvdz.x;
+    }
+  }
   for (var i = 0; i < i32(u.numLayers); i++) {
     let l = u.layers[i];
     let dir = l.dirScaleAmp.xy;
@@ -56,7 +80,7 @@ fn waveSurface(xz: vec2f, ampMul: f32) -> vec2f {
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let xz = vec2f(u.foamCX, u.foamCZ) + (in.uv - 0.5) * (2.0 * u.foamRegion);
-  let s = waveSurface(xz, diskAmpAll(xz));
+  let s = waveSurface(xz);
   let jac = s.x;
   let ty = terrainHeight(xz);
   // The ghost wave field extends over dry land; only actually submerged

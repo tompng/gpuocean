@@ -36,7 +36,9 @@ async function main() {
   filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
   ocean.coast = coast
-  ocean.disks = [{ x: -110, z: -50, rIn: 40, rOut: 80, amp: 0.1 }]
+  ocean.disks = [
+    { x: -85, z: 95, rIn: 35, rOut: 75, amp: 0.35, waveDir: 120, wavelength: 6, waveAmp: 0.15 },
+  ]
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
@@ -86,7 +88,8 @@ async function main() {
     const capSpeed = Math.sqrt(GRAVITY / capK + CAPILLARY_SIGMA_RHO * capK)
     capField.update(waveDt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
     chain.update(waveDt, params, (x, z) =>
-      sampleWaveLevel(x, z, noise, waveField, ocean.layerCache) * ocean.diskAmpAt(x, z),
+      sampleWaveLevel(x, z, noise, waveField, ocean.layerCache) * ocean.diskAmpAt(x, z)
+        + ocean.diskWaveLevel(x, z, noise, waveField),
       camera.target[0], camera.target[2])
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
