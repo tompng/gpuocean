@@ -22,6 +22,9 @@ struct VSOut {
   @location(4) waveXZ: vec2f,
   // film stretch: rendered world meters per band meter (rest ~0.07)
   @location(5) stretch: f32,
+  // region-disk amplitude multiplier at this vertex; the fragment normals
+  // and foam statistics must scale by the same factor as the geometry
+  @location(6) ampMul: f32,
 }
 
 fn coastAt(col: f32) -> vec4f {
@@ -82,7 +85,7 @@ fn cellForDistance(d: f32) -> f32 {
   return max(0.25, 0.25 + 0.08 * (d - 32.0));
 }
 
-fn sampleWaves(xz: vec2f) -> WaveSample {
+fn sampleWaves(xz: vec2f, ampMul: f32) -> WaveSample {
   var height = 0.0;
   var disp = vec2f(0.0);
   let cell = cellForDistance(distance(u.cameraPos.xz, xz));
@@ -97,6 +100,8 @@ fn sampleWaves(xz: vec2f) -> WaveSample {
     height += l.dirScaleAmp.w * s.x * att;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y * att) * l.dirScaleAmp.xy;
   }
+  height *= ampMul;
+  disp *= ampMul;
   // Forward displacement through a convex ramp of crest-relative height:
   // only tall crests lean (a linear ramp would shear every scale by the same
   // angle, reading as wind-carved dunes), and f' saturates to bound the
@@ -129,12 +134,29 @@ const TILE_K: f32 = 16.0;
 
 struct TileIn {
   @location(0) local: vec2f,
-  // tile index (integer-valued) and the level's cell size in meters
-  @location(1) tile: vec3f,
+  // tile index (integer-valued), the level's cell size in meters, and the
+  // packed disk-list handle (base * 64 + count into diskList)
+  @location(1) tile: vec4f,
 }
 
-fn openWaterVertex(xz: vec2f) -> VSOut {
-  let w = sampleWaves(xz);
+// Each tile instance carries an index list of the disks that can reach it
+// (built in ocean.js, geometric test only — see wave_common's Disk note
+// for why differing lists stay bitwise-consistent). The ribbons use
+// diskAmpAll instead: no instance list, and the disk set is small.
+@group(0) @binding(12) var<storage, read> diskList: array<u32>;
+
+fn diskAmpAt(xz: vec2f, listInfo: f32) -> f32 {
+  let info = u32(listInfo + 0.5);
+  let base = info >> 6u;
+  var m = 1.0;
+  for (var i = base; i < base + (info & 63u); i++) {
+    m *= diskFactor(diskBuf.data[diskList[i]], xz);
+  }
+  return m;
+}
+
+fn openWaterVertex(xz: vec2f, ampMul: f32) -> VSOut {
+  let w = sampleWaves(xz, ampMul);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
   // The cut keys on the MATERIAL position: the ribbon's seaward edge is a
@@ -152,13 +174,15 @@ fn openWaterVertex(xz: vec2f) -> VSOut {
   out.st = vec2f(-1000.0, 0.0);
   out.waveXZ = xz;
   out.stretch = 1.0;
+  out.ampMul = ampMul;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }
 
 @vertex
 fn vs_grid(in: TileIn) -> VSOut {
-  return openWaterVertex((in.tile.xy * TILE_K + in.local) * in.tile.z);
+  let xz = (in.tile.xy * TILE_K + in.local) * in.tile.z;
+  return openWaterVertex(xz, diskAmpAt(xz, in.tile.w));
 }
 
 // Zero-width wall along a level boundary. At a 2:1 T-junction the crack
@@ -172,12 +196,15 @@ struct WallIn {
   // edge origin in the fine level's lattice units (integer-valued), the
   // fine cell size, and the axis flag (0: along +x, 1: along +z)
   @location(1) inst: vec4f,
+  // packed disk-list handle, built for the edge exactly like a tile's
+  @location(2) listInfo: f32,
 }
 
 @vertex
 fn vs_wall(in: WallIn) -> VSOut {
   let axis = select(vec2f(1.0, 0.0), vec2f(0.0, 1.0), in.inst.w > 0.5);
-  return openWaterVertex((in.inst.xy + axis * in.along) * in.inst.z);
+  let xz = (in.inst.xy + axis * in.along) * in.inst.z;
+  return openWaterVertex(xz, diskAmpAt(xz, in.listInfo));
 }
 
 // ribbon row pitch (28m band / 140 cells); the skirt spans two rows
@@ -196,7 +223,8 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f) -> VSOut {
   // band, the faded segment ends), compressed anchors would smear the
   // world foam into streaks and kink the normals.
   let matWorld = coastP + coastN * (-REST_DEPTH / u.slope + b);
-  let w = sampleWaves(matWorld);
+  let ampMul = diskAmpAll(matWorld);
+  let w = sampleWaves(matWorld, ampMul);
   let sb = simBlend(b);
   let chain = simState(b, col);
   let chainJ = simState(0.0, col);
@@ -245,6 +273,7 @@ fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f) -> VSOut {
   out.gridXZ = matWorld;
   out.cut = -1.0;
   out.st = vec2f(b, col);
+  out.ampMul = ampMul;
   out.waveXZ = mix(matWorld, coastP + coastN * simRestS(b), sb);
   let eS = 1.0;
   out.stretch = abs(simRestS(b + eS) + mix(chainJ.x, simState(b + eS, col).x, smoothstep(0.0, 12.0, b + eS))
@@ -302,7 +331,7 @@ struct NormalSample {
   sigmaP: f32,
 }
 
-fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -> NormalSample {
+fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32, ampMul: f32) -> NormalSample {
   var dPx = vec3f(1.0, 0.0, 0.0);
   var dPz = vec3f(0.0, 0.0, 1.0);
   var varC = 0.0;
@@ -315,7 +344,7 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
     let l = u.layers[i];
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
-    let amp = l.dirScaleAmp.w * (1.0 - smoothstep(5.0, 14.0, mpp * l.dirScaleAmp.z * u.hGrad * COPY_FINE));
+    let amp = l.dirScaleAmp.w * ampMul * (1.0 - smoothstep(5.0, 14.0, mpp * l.dirScaleAmp.z * u.hGrad * COPY_FINE));
     let s = textureSample(waveTex, samp, layerUV(xz, i));
     let duvdx = vec2f(dir.x, -dir.y) * invL;
     let duvdz = vec2f(dir.y, dir.x) * invL;
@@ -325,7 +354,7 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
     dPx += vec3f(dir.x * dDdu * duvdx.x, amp * dot(grad, duvdx), dir.y * dDdu * duvdx.x);
     dPz += vec3f(dir.x * dDdu * duvdz.x, amp * dot(grad, duvdz), dir.y * dDdu * duvdz.x);
     let cAmp = u.choppiness * amp * u.dGrad * invL;
-    let cAmpP = u.choppiness * l.dirScaleAmp.w * u.dGrad * invL;
+    let cAmpP = u.choppiness * l.dirScaleAmp.w * ampMul * u.dGrad * invL;
     varC += cAmp * cAmp;
     varP += cAmpP * cAmpP;
   }
@@ -384,7 +413,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // material sampling would compress them onto the wedge with a step at
   // the junction — so they survive onto the film without artifacts
   let rippleXZ = mix(in.gridXZ, in.world.xz, sbF);
-  let ns = surfaceNormal(in.waveXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), 1.0 - sbF);
+  let ns = surfaceNormal(in.waveXZ, rippleXZ, dist, max(in.world.y * u.ampInv, 0.0), 1.0 - sbF, in.ampMul);
   var n = ns.n;
   let ty = terrainHeight(in.world.xz);
   // The lower edge sits above the residual softmax offset left on dry sand,
@@ -551,6 +580,7 @@ fn vs_land(in: TileIn) -> VSOut {
   out.st = vec2f(-1000.0, 0.0);
   out.waveXZ = xz;
   out.stretch = 1.0;
+  out.ampMul = 1.0;
   out.clip = u.viewProj * vec4f(out.world, 1.0);
   return out;
 }

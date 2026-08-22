@@ -17,6 +17,8 @@ const TILE_CELLS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 const MAX_DIST = 8000
 const MAX_TILES = 4096
 const MAX_WALLS = 4096
+const MAX_DISKS = 64
+const MAX_DISK_LIST = 16384
 const distForCell = c => 32 + (c - 0.25) / 0.08
 const CELL = 0.4
 const LINEAR_CELLS = 160
@@ -70,6 +72,8 @@ export class Ocean {
         { binding: 8, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 10, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 11, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 12, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     })
     const filmLayout = device.createBindGroupLayout({
@@ -102,9 +106,9 @@ export class Ocean {
           attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
         },
         {
-          arrayStride: 12,
+          arrayStride: 16,
           stepMode: 'instance',
-          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x3' }],
+          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }],
         },
       ],
     })
@@ -135,6 +139,22 @@ export class Ocean {
       size: 672,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
+    // Region disks: world circles modulating the wave parameters, plus the
+    // per-tile index lists rebuilt each frame alongside the tile instances.
+    // Disk data starts at offset 16 (the WGSL struct's runtime array sits
+    // after the 16-aligned count field)
+    this.disks = []
+    this.diskBuffer = device.createBuffer({
+      size: 16 + MAX_DISKS * 32,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
+    this.diskListBuffer = device.createBuffer({
+      size: MAX_DISK_LIST * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
+    this.diskData = new Float32Array(4 + MAX_DISKS * 8)
+    this.diskCountData = new Uint32Array(this.diskData.buffer, 0, 1)
+    this.diskListData = new Uint32Array(MAX_DISK_LIST)
     const sampler = device.createSampler({
       addressModeU: 'repeat',
       addressModeV: 'repeat',
@@ -160,6 +180,8 @@ export class Ocean {
         { binding: 8, resource: coastView },
         { binding: 9, resource: sdfView },
         { binding: 10, resource: mainTableView },
+        { binding: 11, resource: { buffer: this.diskBuffer } },
+        { binding: 12, resource: { buffer: this.diskListBuffer } },
       ],
     }))
 
@@ -170,15 +192,15 @@ export class Ocean {
     this.tileLineCount = tileLine.length
     this.tileVertexBuffer = createVertexBuffer(device, buildTileVertices(TILE_K))
     this.waterInst = device.createBuffer({
-      size: MAX_TILES * 12,
+      size: MAX_TILES * 16,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })
     this.landInst = device.createBuffer({
-      size: MAX_TILES * 12,
+      size: MAX_TILES * 16,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })
-    this.waterInstData = new Float32Array(MAX_TILES * 3)
-    this.landInstData = new Float32Array(MAX_TILES * 3)
+    this.waterInstData = new Float32Array(MAX_TILES * 4)
+    this.landInstData = new Float32Array(MAX_TILES * 4)
     // level-boundary walls: crack faces either way, so no culling
     const wallVertex = entryPoint => ({
       module,
@@ -189,9 +211,12 @@ export class Ocean {
           attributes: [{ shaderLocation: 0, offset: 0, format: 'float32' }],
         },
         {
-          arrayStride: 16,
+          arrayStride: 20,
           stepMode: 'instance',
-          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }],
+          attributes: [
+            { shaderLocation: 1, offset: 0, format: 'float32x4' },
+            { shaderLocation: 2, offset: 16, format: 'float32' },
+          ],
         },
       ],
     })
@@ -204,10 +229,10 @@ export class Ocean {
     this.wallVertexBuffer = createVertexBuffer(device, buildWallVertices(TILE_K))
     this.wallVertCount = (TILE_K / 2) * 3
     this.wallInst = device.createBuffer({
-      size: MAX_WALLS * 16,
+      size: MAX_WALLS * 20,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })
-    this.wallInstData = new Float32Array(MAX_WALLS * 4)
+    this.wallInstData = new Float32Array(MAX_WALLS * 5)
 
     const [ribTri, ribLine] = buildIndices(RIBBON_CELLS, this.gridN)
     this.ribbonTriIndices = createIndexBuffer(device, ribTri)
@@ -380,12 +405,35 @@ export class Ocean {
   // land set (terrain can never rise above any visible water surface).
   updateTileInstances(eye, viewProj, params) {
     const planes = frustumPlanes(viewProj)
-    const pad = 4 * params.amplitude + 2
+    const disks = this.disks.slice(0, MAX_DISKS)
+    // amp-raising disks push the surface above the global amplitude's
+    // bounds, so the culling boxes widen by the largest multiplier
+    const ampMax = disks.reduce((m, d) => Math.max(m, d.amp), 1) * params.amplitude
+    const pad = 4 * ampMax + 2
     const yMin = -params.depth - 3
-    const yMax = 3.5 + 4 * params.amplitude
+    const yMax = 3.5 + 4 * ampMax
     const cutSDF = -(REST_DEPTH / SLOPE + 4)
-    const landSDF = -(4 * params.amplitude + 1) / SLOPE
+    const landSDF = -(4 * ampMax + 1) / SLOPE
     const sdf = this.coast.sampleSDF
+    this.diskCountData[0] = disks.length
+    disks.forEach((d, i) => this.diskData.set([d.x, d.z, d.rIn, d.rOut, d.amp, 0, 0, 0], 4 + i * 8))
+    this.device.queue.writeBuffer(this.diskBuffer, 0, this.diskData, 0, 4 + disks.length * 8)
+    // Disk-list handle for one rect, packed as base * 64 + count. The test
+    // is purely geometric (rOut circle vs rect): a disk left out of a
+    // neighbouring rect's list has exactly zero influence on the shared
+    // edge, so differing lists still agree bitwise at shared vertices —
+    // which any value-based pruning would break.
+    let listLen = 0
+    const diskListFor = (x0, z0, x1, z1) => {
+      const base = listLen
+      for (const [i, d] of disks.entries()) {
+        if (listLen - base >= 63 || listLen >= MAX_DISK_LIST) break
+        const dx = Math.max(x0 - d.x, d.x - x1, 0)
+        const dz = Math.max(z0 - d.z, d.z - z1, 0)
+        if (dx * dx + dz * dz < d.rOut * d.rOut) this.diskListData[listLen++] = i
+      }
+      return base * 64 + (listLen - base)
+    }
     let water = 0
     let land = 0
     let walls = 0
@@ -414,11 +462,11 @@ export class Ocean {
           // the SDF is 1-Lipschitz: five samples bound the tile's range
           // within half a span
           if (sMin - span / 2 <= cutSDF && water < MAX_TILES) {
-            this.waterInstData.set([tx / span, tz / span, cell], water * 3)
+            this.waterInstData.set([tx / span, tz / span, cell, diskListFor(tx, tz, tx + span, tz + span)], water * 4)
             water++
           }
           if (sMax + span / 2 >= landSDF && land < MAX_TILES) {
-            this.landInstData.set([tx / span, tz / span, cell], land * 3)
+            this.landInstData.set([tx / span, tz / span, cell, 0], land * 4)
             land++
           }
         }
@@ -427,31 +475,42 @@ export class Ocean {
       // boundary, where the next (coarser) level takes over
       if (!isLast) {
         for (let x = x0; x < x1; x += span) {
-          walls = this.pushWall(walls, x, z0, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf)
-          walls = this.pushWall(walls, x, z1, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf)
+          walls = this.pushWall(walls, x, z0, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
+          walls = this.pushWall(walls, x, z1, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
         }
         for (let z = z0; z < z1; z += span) {
-          walls = this.pushWall(walls, x0, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf)
-          walls = this.pushWall(walls, x1, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf)
+          walls = this.pushWall(walls, x0, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
+          walls = this.pushWall(walls, x1, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
         }
       }
       inner = [x0, z0, x1, z1]
     }
-    this.device.queue.writeBuffer(this.waterInst, 0, this.waterInstData, 0, water * 3)
-    this.device.queue.writeBuffer(this.landInst, 0, this.landInstData, 0, land * 3)
-    this.device.queue.writeBuffer(this.wallInst, 0, this.wallInstData, 0, walls * 4)
+    this.device.queue.writeBuffer(this.waterInst, 0, this.waterInstData, 0, water * 4)
+    this.device.queue.writeBuffer(this.landInst, 0, this.landInstData, 0, land * 4)
+    this.device.queue.writeBuffer(this.wallInst, 0, this.wallInstData, 0, walls * 5)
+    if (listLen > 0) this.device.queue.writeBuffer(this.diskListBuffer, 0, this.diskListData, 0, listLen)
     return [water, land, walls]
   }
 
-  pushWall(count, x, z, span, cell, axis, planes, pad, yMin, yMax, cutSDF, sdf) {
+  pushWall(count, x, z, span, cell, axis, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor) {
     if (count >= MAX_WALLS) return count
     const x1 = axis === 0 ? x + span : x
     const z1 = axis === 0 ? z : z + span
     if (!boxVisible(planes, Math.min(x, x1) - pad, yMin, Math.min(z, z1) - pad, Math.max(x, x1) + pad, yMax, Math.max(z, z1) + pad)) return count
     const sMin = Math.min(sdf(x, z), sdf(x1, z1), sdf((x + x1) / 2, (z + z1) / 2))
     if (sMin - span / 2 > cutSDF) return count
-    this.wallInstData.set([x / cell, z / cell, cell, axis], count * 4)
+    this.wallInstData.set([x / cell, z / cell, cell, axis, diskListFor(Math.min(x, x1), Math.min(z, z1), Math.max(x, x1), Math.max(z, z1))], count * 5)
     return count + 1
+  }
+
+  // CPU replica of the shader's disk modulation, for the chain drive
+  diskAmpAt(x, z) {
+    let m = 1
+    for (const d of this.disks) {
+      const t = Math.min(Math.max((Math.hypot(x - d.x, z - d.z) - d.rIn) / (d.rOut - d.rIn), 0), 1)
+      m *= 1 + (d.amp - 1) * (1 - t * t * (3 - 2 * t))
+    }
+    return m
   }
 }
 

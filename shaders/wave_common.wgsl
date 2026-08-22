@@ -65,6 +65,36 @@ fn layerUV(xz: vec2f, i: i32) -> vec2f {
   return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * l.dirScaleAmp.z + l.scroll.xy;
 }
 
+// Region disks modulate the wave parameters (amplitude for now) inside
+// world-space circles. A disk's factor returns to exactly 1.0 at rOut and
+// beyond, so consumers that scan differing subsets (per-tile lists in the
+// ocean shader, the whole set elsewhere) agree bitwise wherever they
+// overlap — extras only ever multiply by 1.0.
+struct Disk {
+  // center x, z, full-weight radius rIn, zero-weight radius rOut
+  posR: vec4f,
+  // x: amplitude multiplier (yzw reserved)
+  amp: vec4f,
+}
+struct DiskBuf {
+  count: u32,
+  data: array<Disk>,
+}
+@group(0) @binding(11) var<storage, read> diskBuf: DiskBuf;
+
+fn diskFactor(d: Disk, xz: vec2f) -> f32 {
+  let w = 1.0 - smoothstep(d.posR.z, d.posR.w, distance(xz, d.posR.xy));
+  return mix(1.0, d.amp.x, w);
+}
+
+fn diskAmpAll(xz: vec2f) -> f32 {
+  var m = 1.0;
+  for (var i = 0u; i < diskBuf.count; i++) {
+    m *= diskFactor(diskBuf.data[i], xz);
+  }
+  return m;
+}
+
 // The coastline is authored data (src/coast.js) baked at load into a
 // signed-distance texture (negative in the sea) and arclength tables.
 // Beyond the baked region the coast is a straight line at BASE_SHORE_X.
