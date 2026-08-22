@@ -71,17 +71,27 @@ struct WaveSample {
 // attenuations key on that finest content
 const COPY_FINE: f32 = 1.75;
 
-fn sampleWaves(xz: vec2f, cell: f32) -> WaveSample {
+// The band attenuation keys on the camera DISTANCE, not on the sampling
+// mesh's cell size: cellForDistance is the smooth resolution schedule the
+// tile rings are built against (a tile's cell is always <= the schedule at
+// its nearest point, see ocean.js). Keying on distance makes the height
+// field a pure function of world position and camera — vertices shared
+// between tiles of DIFFERENT levels agree bitwise, so level boundaries
+// have no step at shared vertices.
+fn cellForDistance(d: f32) -> f32 {
+  return max(0.25, 0.25 + 0.08 * (d - 32.0));
+}
+
+fn sampleWaves(xz: vec2f) -> WaveSample {
   var height = 0.0;
   var disp = vec2f(0.0);
+  let cell = cellForDistance(distance(u.cameraPos.xz, xz));
   for (var i = 0; i < i32(u.numLayers); i++) {
     let l = u.layers[i];
-    // The noise is band-limited, so a smooth attenuation on the layer's
-    // texel footprint stands in for mip filtering: coarse cells fade the
-    // layer out instead of aliasing vertex heights, with no level seams.
-    // The cutoff sits well below the band's Nyquist (~14 texels): with
-    // fewer than ~5 vertices per wave the geometry reads as polygons, so
-    // the height dies early and the fragment normals carry the detail.
+    // The noise is band-limited, so a smooth attenuation on the schedule's
+    // footprint stands in for mip filtering: the layer's height dies well
+    // below its Nyquist (fewer than ~5 vertices per wave reads as
+    // polygons) and the fragment normals carry the detail from there.
     let att = 1.0 - smoothstep(2.0, 6.0, cell * l.dirScaleAmp.z * u.hGrad * COPY_FINE);
     let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
     height += l.dirScaleAmp.w * s.x * att;
@@ -108,46 +118,25 @@ fn softClamp(height: f32, ty: f32) -> f32 {
   return ty + 0.1 + 0.5 * (dy + sqrt(dy * dy + 0.0225));
 }
 
-// The grid/land lattice is static and uniform; the vertex shader maps it
-// around the camera with a radial warp — identity out to WARP_LINEAR, then
-// exponentially growing cells. The center snaps to the lattice pitch so
-// near vertices sit on a fixed world lattice (no swimming); far vertices
-// slide with the camera, which is invisible because every field they
-// sample is a function of world position.
-const WARP_CELL: f32 = 0.4;
-const WARP_LINEAR: f32 = 64.0;
-const WARP_GROWTH: f32 = 1.08;
+// Open-ocean water: world-anchored square tiles at power-of-two cell
+// sizes, instanced from one shared K x K lattice. World position is the
+// integer lattice index times the cell size, which is float-exact, so
+// edges shared between tiles of the same level match bitwise; different
+// levels agree at shared vertices through the distance-keyed attenuation.
+// The grid still ends at the handover band's seaward edge under the shore
+// ribbon's margin and skirt rows, exactly as before.
+const TILE_K: f32 = 16.0;
 
-fn warpVertex(p: vec2f) -> vec3f {
-  let snap = floor(u.cameraPos.xz / WARP_CELL + 0.5) * WARP_CELL;
-  let r = length(p);
-  if (r <= WARP_LINEAR) {
-    return vec3f(snap + p, WARP_CELL);
-  }
-  let k = min((r - WARP_LINEAR) / WARP_CELL, 98.0);
-  let g = pow(WARP_GROWTH, k);
-  let rw = WARP_LINEAR + WARP_CELL * (g - 1.0) / (WARP_GROWTH - 1.0);
-  return vec3f(snap + p * (rw / r), WARP_CELL * g);
+struct TileIn {
+  @location(0) local: vec2f,
+  // tile index (integer-valued) and the level's cell size in meters
+  @location(1) tile: vec3f,
 }
 
-// the grid's cell size at a given world distance from the camera: the
-// geometric cell growth sums to an exactly linear distance-cell relation
-fn warpCellAt(dist: f32) -> f32 {
-  return WARP_CELL + max((WARP_GROWTH - 1.0) * (dist - WARP_LINEAR), 0.0);
-}
-
-// Open-ocean grid: pure scroll waves, ending at the handover band's
-// seaward edge under the shore ribbon's margin and skirt rows. In the
-// overlap both meshes tessellate the same surface with different vertex
-// phases, so they interleave within their interpolation error and either
-// may win locally — never a fixed sink, which used to shear through wave
-// fronts as a visible wall. Any see-through sliver is backed by the
-// ribbon's folded-down skirt.
 @vertex
-fn vs_grid(in: VSIn) -> VSOut {
-  let wv = warpVertex(in.pos);
-  let xz = wv.xy;
-  let w = sampleWaves(xz, wv.z);
+fn vs_grid(in: TileIn) -> VSOut {
+  let xz = (in.tile.xy * TILE_K + in.local) * in.tile.z;
+  let w = sampleWaves(xz);
   let dispXZ = xz + w.disp;
   let ty = terrainHeight(dispXZ);
   // The cut keys on the MATERIAL position: the ribbon's seaward edge is a
@@ -178,19 +167,14 @@ const SKIRT_DROP: f32 = 0.1;
 // landward of the tip. Vertex x is normalized over the ribbon's band; the
 // film's world position lies along the column's landward normal at its
 // displaced normal-distance s, so the swash runs shore-perpendicular.
-fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f, cell: f32) -> VSOut {
+fn ribbonVertex(b: f32, col: f32, coastP: vec2f, coastN: vec2f) -> VSOut {
   // The wave side anchors to the UNCOMPRESSED material position (band
   // meters along the normal) — the rest-compressed mapping is only for
   // placing the film. Wherever the wave side still renders (the handover
   // band, the faded segment ends), compressed anchors would smear the
   // world foam into streaks and kink the normals.
   let matWorld = coastP + coastN * (-REST_DEPTH / u.slope + b);
-  // The ribbon's own lattice stays fine near the coast no matter where the
-  // camera is, so the vs height attenuation also takes the open grid's cell
-  // at this distance — otherwise a far coast keeps full wave height against
-  // the grid's flattened surface and the seam shows a step
-  let cellW = max(cell, warpCellAt(distance(u.cameraPos.xz, matWorld)));
-  let w = sampleWaves(matWorld, cellW);
+  let w = sampleWaves(matWorld);
   let sb = simBlend(b);
   let chain = simState(b, col);
   let chainJ = simState(0.0, col);
@@ -273,7 +257,7 @@ fn vs(in: VSIn) -> VSOut {
   let b = in.pos.x * (SIM_SPAN + SIM_BAND + 2.0 * SKIRT_W) - SIM_BAND - 2.0 * SKIRT_W;
   let col = clamp(((t - u.simZBase) / 160.0 + 0.5) * f32(MAIN_COLS - 1), 0.0, f32(MAIN_COLS - 1));
   let c = mainCoastAt(t);
-  return ribbonVertex(b, col, c.xy, c.zw, in.cell);
+  return ribbonVertex(b, col, c.xy, c.zw);
 }
 
 @vertex
@@ -281,7 +265,7 @@ fn vs_island(in: VSIn) -> VSOut {
   let b = in.pos.x * (SIM_SPAN + SIM_BAND + 2.0 * SKIRT_W) - SIM_BAND - 2.0 * SKIRT_W;
   let col = in.pos.y;
   let c = coastAt(col);
-  return ribbonVertex(b, col, c.xy, normalize(c.zw), in.cell);
+  return ribbonVertex(b, col, c.xy, normalize(c.zw));
 }
 
 struct NormalSample {
@@ -536,8 +520,8 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 // so the coincident fragments are indistinguishable. Underwater parts
 // are simply occluded by the opaque sea surface.
 @vertex
-fn vs_land(in: VSIn) -> VSOut {
-  let xz = warpVertex(in.pos).xy;
+fn vs_land(in: TileIn) -> VSOut {
+  let xz = (in.tile.xy * TILE_K + in.local) * in.tile.z;
   var out: VSOut;
   out.world = vec3f(xz.x, terrainHeight(xz), xz.y);
   out.gridXZ = xz;

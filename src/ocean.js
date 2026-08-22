@@ -1,4 +1,4 @@
-import { SLOPE } from './chain.js'
+import { SLOPE, REST_DEPTH } from './chain.js'
 import { COPY_RATIO } from './noise.js'
 
 const GRAVITY = 9.81
@@ -9,6 +9,14 @@ const CAPILLARY_SIGMA_RHO = 7.4e-5
 // Warped grid: uniform cells near the center, then exponential growth per
 // cell out to beyond the horizon distance seen from the camera's max height
 const GRID_N = 512
+// Water/land tiling: one TILE_K x TILE_K lattice instanced at power-of-two
+// cell sizes. Ring assignment guarantees each tile's cell <= the shader's
+// cellForDistance schedule at the tile's nearest point (must match WGSL)
+const TILE_K = 16
+const TILE_CELLS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+const MAX_DIST = 8000
+const MAX_TILES = 4096
+const distForCell = c => 32 + (c - 0.25) / 0.08
 const CELL = 0.4
 const LINEAR_CELLS = 160
 const CELL_GROWTH = 1.12
@@ -73,7 +81,7 @@ export class Ocean {
       multisample: { count: sampleCount },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     }
-    const vertex = entryPoint => ({
+    const ribbonVertex = entryPoint => ({
       module,
       entryPoint,
       buffers: [{
@@ -84,23 +92,38 @@ export class Ocean {
         ],
       }],
     })
+    const tileVertex = entryPoint => ({
+      module,
+      entryPoint,
+      buffers: [
+        {
+          arrayStride: 8,
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
+        },
+        {
+          arrayStride: 12,
+          stepMode: 'instance',
+          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x3' }],
+        },
+      ],
+    })
     // Back faces only exist where choppiness folds the surface over; culling
     // them lets the front-facing sheets win instead of showing the inverted
     // flap (the crease itself sits in the foam-generating region anyway)
-    const makePipeline = (vsEntry, fsEntry, topology) => device.createRenderPipeline({
+    const makePipeline = (vsEntry, fsEntry, topology, vtx) => device.createRenderPipeline({
       ...base,
-      vertex: vertex(vsEntry),
+      vertex: vtx(vsEntry),
       fragment: { module, entryPoint: fsEntry, targets: [{ format }] },
       primitive: topology === 'triangle-list' ? { topology, cullMode: 'back' } : { topology },
     })
-    this.fillGridPipeline = makePipeline('vs_grid', 'fs', 'triangle-list')
-    this.fillRibbonPipeline = makePipeline('vs', 'fs', 'triangle-list')
-    this.wireGridPipeline = makePipeline('vs_grid', 'fs_wire', 'line-list')
-    this.wireRibbonPipeline = makePipeline('vs', 'fs_wire', 'line-list')
-    this.fillIslandPipeline = makePipeline('vs_island', 'fs', 'triangle-list')
-    this.wireIslandPipeline = makePipeline('vs_island', 'fs_wire', 'line-list')
-    this.fillLandPipeline = makePipeline('vs_land', 'fs_land', 'triangle-list')
-    this.wireLandPipeline = makePipeline('vs_land', 'fs_wire', 'line-list')
+    this.fillGridPipeline = makePipeline('vs_grid', 'fs', 'triangle-list', tileVertex)
+    this.fillRibbonPipeline = makePipeline('vs', 'fs', 'triangle-list', ribbonVertex)
+    this.wireGridPipeline = makePipeline('vs_grid', 'fs_wire', 'line-list', tileVertex)
+    this.wireRibbonPipeline = makePipeline('vs', 'fs_wire', 'line-list', ribbonVertex)
+    this.fillIslandPipeline = makePipeline('vs_island', 'fs', 'triangle-list', ribbonVertex)
+    this.wireIslandPipeline = makePipeline('vs_island', 'fs_wire', 'line-list', ribbonVertex)
+    this.fillLandPipeline = makePipeline('vs_land', 'fs_land', 'triangle-list', tileVertex)
+    this.wireLandPipeline = makePipeline('vs_land', 'fs_wire', 'line-list', tileVertex)
     this.bindLayout = bindLayout
     this.filmGroups = filmFoamViews.map(view => device.createBindGroup({
       layout: filmLayout,
@@ -139,12 +162,22 @@ export class Ocean {
       ],
     }))
 
-    const [tri, line] = buildIndices(this.gridN, this.gridN)
-    this.triIndices = createIndexBuffer(device, tri)
-    this.lineIndices = createIndexBuffer(device, line)
-    this.triCount = tri.length
-    this.lineCount = line.length
-    this.vertexBuffer = createVertexBuffer(device, buildVertices(this.gridN))
+    const [tileTri, tileLine] = buildIndices(TILE_K, TILE_K)
+    this.tileTriIndices = createIndexBuffer(device, tileTri)
+    this.tileLineIndices = createIndexBuffer(device, tileLine)
+    this.tileTriCount = tileTri.length
+    this.tileLineCount = tileLine.length
+    this.tileVertexBuffer = createVertexBuffer(device, buildTileVertices(TILE_K))
+    this.waterInst = device.createBuffer({
+      size: MAX_TILES * 12,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    this.landInst = device.createBuffer({
+      size: MAX_TILES * 12,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    this.waterInstData = new Float32Array(MAX_TILES * 3)
+    this.landInstData = new Float32Array(MAX_TILES * 3)
 
     const [ribTri, ribLine] = buildIndices(RIBBON_CELLS, this.gridN)
     this.ribbonTriIndices = createIndexBuffer(device, ribTri)
@@ -277,15 +310,18 @@ export class Ocean {
     u[164] = params.foamScale
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
+    const [waterCount, landCount] = this.updateTileInstances(eye, viewProj, params)
     const wire = params.wireframe
     pass.setBindGroup(0, this.bindGroups[foamIndex])
     pass.setBindGroup(1, this.filmGroups[filmIndex])
     pass.setPipeline(wire ? this.wireGridPipeline : this.fillGridPipeline)
-    pass.setVertexBuffer(0, this.vertexBuffer)
-    pass.setIndexBuffer(wire ? this.lineIndices : this.triIndices, 'uint32')
-    pass.drawIndexed(wire ? this.lineCount : this.triCount)
+    pass.setVertexBuffer(0, this.tileVertexBuffer)
+    pass.setVertexBuffer(1, this.waterInst)
+    pass.setIndexBuffer(wire ? this.tileLineIndices : this.tileTriIndices, 'uint32')
+    pass.drawIndexed(wire ? this.tileLineCount : this.tileTriCount, waterCount)
     pass.setPipeline(wire ? this.wireRibbonPipeline : this.fillRibbonPipeline)
     pass.setVertexBuffer(0, this.ribbonVertexBuffer)
+    pass.setVertexBuffer(1, null)
     pass.setIndexBuffer(wire ? this.ribbonLineIndices : this.ribbonTriIndices, 'uint32')
     pass.drawIndexed(wire ? this.ribbonLineCount : this.ribbonTriCount)
     pass.setPipeline(wire ? this.wireIslandPipeline : this.fillIslandPipeline)
@@ -293,9 +329,68 @@ export class Ocean {
     pass.setIndexBuffer(wire ? this.islandLineIndices : this.islandTriIndices, 'uint32')
     pass.drawIndexed(wire ? this.islandLineCount : this.islandTriCount)
     pass.setPipeline(wire ? this.wireLandPipeline : this.fillLandPipeline)
-    pass.setVertexBuffer(0, this.vertexBuffer)
-    pass.setIndexBuffer(wire ? this.lineIndices : this.triIndices, 'uint32')
-    pass.drawIndexed(wire ? this.lineCount : this.triCount)
+    pass.setVertexBuffer(0, this.tileVertexBuffer)
+    pass.setVertexBuffer(1, this.landInst)
+    pass.setIndexBuffer(wire ? this.tileLineIndices : this.tileTriIndices, 'uint32')
+    pass.drawIndexed(wire ? this.tileLineCount : this.tileTriCount, landCount)
+  }
+
+  // World-anchored tile rings: level L covers the square annulus between
+  // the finer levels' extent and the distance where the schedule allows
+  // the next cell size; boundaries align to the coarser level's lattice so
+  // rings partition the plane exactly (no overlap, no gap). Each tile is
+  // frustum-tested and classified by the coast SDF: fully-land tiles skip
+  // the water set (every fragment would be cut), deep-sea tiles skip the
+  // land set (terrain can never rise above any visible water surface).
+  updateTileInstances(eye, viewProj, params) {
+    const planes = frustumPlanes(viewProj)
+    const pad = 4 * params.amplitude + 2
+    const yMin = -params.depth - 3
+    const yMax = 3.5 + 4 * params.amplitude
+    const cutSDF = -(REST_DEPTH / SLOPE + 4)
+    const landSDF = -(4 * params.amplitude + 1) / SLOPE
+    const sdf = this.coast.sampleSDF
+    let water = 0
+    let land = 0
+    let inner = null
+    for (let l = 0; l < TILE_CELLS.length; l++) {
+      const cell = TILE_CELLS[l]
+      const span = TILE_K * cell
+      const isLast = l === TILE_CELLS.length - 1
+      const outerD = isLast ? MAX_DIST : distForCell(TILE_CELLS[l + 1])
+      const align = isLast ? span : span * 2
+      const x0 = Math.floor((eye[0] - outerD) / align) * align
+      const z0 = Math.floor((eye[2] - outerD) / align) * align
+      const x1 = Math.ceil((eye[0] + outerD) / align) * align
+      const z1 = Math.ceil((eye[2] + outerD) / align) * align
+      for (let tz = z0; tz < z1; tz += span) {
+        for (let tx = x0; tx < x1; tx += span) {
+          if (inner && tx >= inner[0] && tx + span <= inner[2] && tz >= inner[1] && tz + span <= inner[3]) continue
+          if (!boxVisible(planes, tx - pad, yMin, tz - pad, tx + span + pad, yMax, tz + span + pad)) continue
+          let sMin = Infinity
+          let sMax = -Infinity
+          for (const [px, pz] of [[tx, tz], [tx + span, tz], [tx, tz + span], [tx + span, tz + span], [tx + span / 2, tz + span / 2]]) {
+            const v = sdf(px, pz)
+            if (v < sMin) sMin = v
+            if (v > sMax) sMax = v
+          }
+          // the SDF is 1-Lipschitz: five samples bound the tile's range
+          // within half a span
+          if (sMin - span / 2 <= cutSDF && water < MAX_TILES) {
+            this.waterInstData.set([tx / span, tz / span, cell], water * 3)
+            water++
+          }
+          if (sMax + span / 2 >= landSDF && land < MAX_TILES) {
+            this.landInstData.set([tx / span, tz / span, cell], land * 3)
+            land++
+          }
+        }
+      }
+      inner = [x0, z0, x1, z1]
+    }
+    this.device.queue.writeBuffer(this.waterInst, 0, this.waterInstData, 0, water * 3)
+    this.device.queue.writeBuffer(this.landInst, 0, this.landInstData, 0, land * 3)
+    return [water, land]
   }
 }
 
@@ -306,21 +401,40 @@ function warpAxis(i) {
   return sign * (LINEAR_CELLS * CELL + CELL * (CELL_GROWTH ** (a - LINEAR_CELLS) - 1) / (CELL_GROWTH - 1))
 }
 
-// Uniform lattice in pre-warp space; the vertex shader warps it around the
-// camera (see warpVertex in ocean.wgsl), so the buffer never changes
-function buildVertices(n) {
-  const half = n / 2
-  const data = new Float32Array((n + 1) * (n + 1) * 3)
+// Local lattice indices of one tile; world position comes from the
+// instance's integer tile index times the cell size, float-exact for
+// power-of-two cells, so shared tile edges match bitwise
+function buildTileVertices(k) {
+  const data = new Float32Array((k + 1) * (k + 1) * 2)
   let p = 0
-  for (let iz = 0; iz <= n; iz++) {
-    for (let ix = 0; ix <= n; ix++) {
-      data[p++] = (ix - half) * CELL
-      data[p++] = (iz - half) * CELL
-      data[p++] = 0
+  for (let iz = 0; iz <= k; iz++) {
+    for (let ix = 0; ix <= k; ix++) {
+      data[p++] = ix
+      data[p++] = iz
     }
   }
   return data
 }
+
+// Gribb-Hartmann planes from the column-major viewProj (WebGPU z in [0,1])
+function frustumPlanes(m) {
+  const row = i => [m[i], m[4 + i], m[8 + i], m[12 + i]]
+  const [r0, r1, r2, r3] = [row(0), row(1), row(2), row(3)]
+  const add = (a, b, sg) => [a[0] + sg * b[0], a[1] + sg * b[1], a[2] + sg * b[2], a[3] + sg * b[3]]
+  return [add(r3, r0, 1), add(r3, r0, -1), add(r3, r1, 1), add(r3, r1, -1), r2, add(r3, r2, -1)]
+}
+
+function boxVisible(planes, x0, y0, z0, x1, y1, z1) {
+  for (const [a, b, c, d] of planes) {
+    const px = a > 0 ? x1 : x0
+    const py = b > 0 ? y1 : y0
+    const pz = c > 0 ? z1 : z0
+    if (a * px + b * py + c * pz + d < 0) return false
+  }
+  return true
+}
+
+
 
 // The ribbon is uniform in normalized x across its band and reuses the
 // grid's warped axis along z, so the shoreline stays fine near the camera

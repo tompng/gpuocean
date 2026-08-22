@@ -149,6 +149,7 @@ function bakeSDF(device, coast) {
   for (const p of pts) buckets[bIndex(p[0], p[1])].push(p)
 
   const data = new Uint16Array(SDF_SIZE * SDF_SIZE)
+  const raw = new Float32Array(SDF_SIZE * SDF_SIZE)
   const texel = 2 * SDF_EXTENT / SDF_SIZE
   for (let iz = 0; iz < SDF_SIZE; iz++) {
     const z = -SDF_EXTENT + (iz + 0.5) * texel
@@ -175,6 +176,7 @@ function bakeSDF(device, coast) {
       }
       let sd = Math.sqrt(bd)
       if (bp && (x - bp[0]) * bp[2] + (z - bp[1]) * bp[3] < 0) sd = -sd
+      raw[iz * SDF_SIZE + ix] = sd
       data[iz * SDF_SIZE + ix] = f16(sd)
     }
   }
@@ -185,6 +187,22 @@ function bakeSDF(device, coast) {
   })
   device.queue.writeTexture({ texture }, data, { bytesPerRow: SDF_SIZE * 2 }, [SDF_SIZE, SDF_SIZE])
   coast.sdfView = texture.createView()
+  // CPU-side replica of the shader's coastSDF (bilinear + far-field blend),
+  // for classifying tiles as land or sea
+  coast.sampleSDF = (x, z) => {
+    const u = (x / (2 * SDF_EXTENT) + 0.5) * SDF_SIZE - 0.5
+    const v = (z / (2 * SDF_EXTENT) + 0.5) * SDF_SIZE - 0.5
+    const cl = (a) => Math.min(Math.max(a, 0), SDF_SIZE - 1)
+    const u0 = cl(Math.floor(u)); const v0 = cl(Math.floor(v))
+    const u1 = cl(u0 + 1); const v1 = cl(v0 + 1)
+    const fu = Math.min(Math.max(u - u0, 0), 1); const fv = Math.min(Math.max(v - v0, 0), 1)
+    const baked = (raw[v0 * SDF_SIZE + u0] * (1 - fu) + raw[v0 * SDF_SIZE + u1] * fu) * (1 - fv)
+                + (raw[v1 * SDF_SIZE + u0] * (1 - fu) + raw[v1 * SDF_SIZE + u1] * fu) * fv
+    const m = Math.max(Math.abs(x), Math.abs(z))
+    const t = Math.min(Math.max((m - (SDF_EXTENT - 48)) / 40, 0), 1)
+    const far = t * t * (3 - 2 * t)
+    return baked * (1 - far) + (x - BASE_SHORE_X) * far
+  }
 }
 
 function uploadMainTable(device, coast) {

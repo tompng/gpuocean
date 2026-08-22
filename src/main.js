@@ -35,6 +35,7 @@ async function main() {
   foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView)
   filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
+  ocean.coast = coast
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
