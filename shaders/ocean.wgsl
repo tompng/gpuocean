@@ -101,6 +101,11 @@ fn sampleWaves(xz: vec2f, listInfo: f32) -> WaveSample {
     // below its Nyquist (fewer than ~5 vertices per wave reads as
     // polygons) and the fragment normals carry the detail from there.
     let att = 1.0 - smoothstep(2.0, 6.0, cell * l.dirScaleAmp.z * u.hGrad * COPY_FINE);
+    // A band whose attenuation has saturated to zero contributes exactly
+    // nothing, so skip the tap. smoothstep saturates, so this is exact rather
+    // than a threshold — and the further away the fragment, the more bands
+    // land here
+    if (att <= 0.0) { continue; }
     let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
     height += l.dirScaleAmp.w * s.x * att;
     disp += (u.choppiness * l.dirScaleAmp.w * s.y * att) * l.dirScaleAmp.xy;
@@ -118,8 +123,8 @@ fn sampleWaves(xz: vec2f, listInfo: f32) -> WaveSample {
     let w = diskWeight(d, xz);
     m *= mix(1.0, d.mods.x, w);
     let amp = w * d.mods.y;
-    if (amp > 0.0) {
-      let att = 1.0 - smoothstep(2.0, 6.0, cell * d.wave.x * u.hGrad * COPY_FINE);
+    let att = 1.0 - smoothstep(2.0, 6.0, cell * d.wave.x * u.hGrad * COPY_FINE);
+    if (amp > 0.0 && att > 0.0) {
       let s = textureSampleLevel(waveTex, samp, diskUV(d, xz), 0.0);
       addH += amp * s.x * att;
       addD += (u.choppiness * amp * s.y * att) * d.mods.zw;
@@ -362,7 +367,14 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32, a
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
     let amp = l.dirScaleAmp.w * ampMul * (1.0 - smoothstep(5.0, 14.0, mpp * l.dirScaleAmp.z * u.hGrad * COPY_FINE));
-    let s = textureSample(waveTex, samp, layerUV(xz, i));
+    // The statistics come from the amplitudes analytically, so accumulating
+    // them before the skip below leaves the foam quantile bit-identical
+    let cAmp = u.choppiness * amp * u.dGrad * invL;
+    let cAmpP = u.choppiness * l.dirScaleAmp.w * ampMul * u.dGrad * invL;
+    varC += cAmp * cAmp;
+    varP += cAmpP * cAmpP;
+    if (amp <= 0.0) { continue; }
+    let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
     let duvdx = vec2f(dir.x, -dir.y) * invL;
     let duvdz = vec2f(dir.y, dir.x) * invL;
     let grad = vec2f(s.z, s.w) * (u.hGrad * hScale);
@@ -370,10 +382,6 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32, a
     let dDdu = u.choppiness * amp * s.x * u.dGrad;
     dPx += vec3f(dir.x * dDdu * duvdx.x, amp * dot(grad, duvdx), dir.y * dDdu * duvdx.x);
     dPz += vec3f(dir.x * dDdu * duvdz.x, amp * dot(grad, duvdz), dir.y * dDdu * duvdz.x);
-    let cAmp = u.choppiness * amp * u.dGrad * invL;
-    let cAmpP = u.choppiness * l.dirScaleAmp.w * ampMul * u.dGrad * invL;
-    varC += cAmp * cAmp;
-    varP += cAmpP * cAmpP;
   }
   // Added disk bands contribute like extra layers (explicit-level samples:
   // the list handle is per-instance, so the loop is non-uniform and
@@ -416,23 +424,31 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32, a
   let fade = clamp(1.0 - dist / 150.0, 0.0, 1.0);
   let isoScale = mix(1.0, conc, u.rippleBias * 0.4) * fade;
   let anisoScale = mix(1.0, conc, u.rippleBias) * fade;
-  for (var i = 0; i < 6; i++) {
-    let l = u.capLayers[i];
-    let dir = l.dirScaleAmp.xy;
-    let invL = l.dirScaleAmp.z;
-    let uvc = vec2f(dot(rippleXZ, dir), dot(rippleXZ, vec2f(-dir.y, dir.x))) * invL + l.scroll.xy;
-    var s: vec4f;
-    var amp: f32;
-    if (i < 3) {
-      s = textureSample(capTex, samp, uvc);
-      amp = isoScale * l.dirScaleAmp.w * u.capHGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.capHGrad));
-    } else {
-      s = textureSample(waveTex, samp, uvc);
-      amp = anisoScale * l.dirScaleAmp.w * u.hGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.hGrad * COPY_FINE));
+  // fade hits exactly zero at 150 m; past that the six taps below were all
+  // multiplied by zero and thrown away
+  if (fade > 0.0) {
+    for (var i = 0; i < 6; i++) {
+      let l = u.capLayers[i];
+      let dir = l.dirScaleAmp.xy;
+      let invL = l.dirScaleAmp.z;
+      var amp: f32;
+      if (i < 3) {
+        amp = isoScale * l.dirScaleAmp.w * u.capHGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.capHGrad));
+      } else {
+        amp = anisoScale * l.dirScaleAmp.w * u.hGrad * (1.0 - smoothstep(5.0, 14.0, mpp * invL * u.hGrad * COPY_FINE));
+      }
+      if (amp <= 0.0) { continue; }
+      let uvc = vec2f(dot(rippleXZ, dir), dot(rippleXZ, vec2f(-dir.y, dir.x))) * invL + l.scroll.xy;
+      var s: vec4f;
+      if (i < 3) {
+        s = textureSampleLevel(capTex, samp, uvc, 0.0);
+      } else {
+        s = textureSampleLevel(waveTex, samp, uvc, 0.0);
+      }
+      let grad = vec2f(s.z, s.w) * amp;
+      dPx.y += dot(grad, vec2f(dir.x, -dir.y) * invL);
+      dPz.y += dot(grad, vec2f(dir.y, dir.x) * invL);
     }
-    let grad = vec2f(s.z, s.w) * amp;
-    dPx.y += dot(grad, vec2f(dir.x, -dir.y) * invL);
-    dPz.y += dot(grad, vec2f(dir.y, dir.x) * invL);
   }
   return NormalSample(normalize(cross(dPz, dPx)), jac, sigma, sigmaP);
 }
