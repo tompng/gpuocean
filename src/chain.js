@@ -1,3 +1,5 @@
+import { bilinearWrap } from './noise.js'
+
 // Heightless swash film: per alongshore column, a horizontal chain of
 // material nodes whose rest state is exactly the still-water wedge between
 // the REST_DEPTH isobath and the static shoreline. Forces use the Lagrangian
@@ -35,6 +37,10 @@ export class ChainSim {
   constructor(device, coast) {
     this.device = device
     this.coast = coast
+    // the layout src/surface.js walks when it inverts the film mapping
+    this.nodes = NODES
+    this.cols = COLS
+    this.mainCols = MAIN_COLS
     this.sample4 = new Float32Array(4)
     this.x = new Float32Array(COLS * NODES)
     this.u = new Float32Array(COLS * NODES)
@@ -265,18 +271,4 @@ export function sampleWaveLevel(x, z, noise, waveField, layers, weights) {
     hsum += l.amp * weights[i] * sh
   }
   return hsum * DRIVE_LEVEL / SLOPE
-}
-
-function bilinearWrap(tex, size, u, v) {
-  const x = (u - Math.floor(u)) * size
-  const y = (v - Math.floor(v)) * size
-  const x0 = Math.floor(x) % size
-  const y0 = Math.floor(y) % size
-  const x1 = (x0 + 1) % size
-  const y1 = (y0 + 1) % size
-  const fx = x - Math.floor(x)
-  const fy = y - Math.floor(y)
-  const a = tex[y0 * size + x0] * (1 - fx) + tex[y0 * size + x1] * fx
-  const b = tex[y1 * size + x0] * (1 - fx) + tex[y1 * size + x1] * fx
-  return a * (1 - fy) + b * fy
 }

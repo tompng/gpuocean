@@ -21,6 +21,22 @@ export const COPY_RATIO = 0.87
 const VARIANT_ANGLES = [0, -10, 10, -5, 5].map(a => a * Math.PI / 180)
 const VARIANT_SEEDS = [12345, 23456, 34567, 45678, 56789]
 
+// Bilinear tap into one of the CPU-side channel arrays, in tile units. The
+// shader samples the same content through a repeat sampler.
+export function bilinearWrap(tex, size, u, v) {
+  const x = (u - Math.floor(u)) * size
+  const y = (v - Math.floor(v)) * size
+  const x0 = Math.floor(x) % size
+  const y0 = Math.floor(y) % size
+  const x1 = (x0 + 1) % size
+  const y1 = (y0 + 1) % size
+  const fx = x - Math.floor(x)
+  const fy = y - Math.floor(y)
+  const a = tex[y0 * size + x0] * (1 - fx) + tex[y0 * size + x1] * fx
+  const b = tex[y1 * size + x0] * (1 - fx) + tex[y1 * size + x1] * fx
+  return a * (1 - fy) + b * fy
+}
+
 export function generateGravityNoiseSet(device, opts = {}) {
   const size = opts.size ?? 256
   const variants = VARIANT_ANGLES.map((angle, k) =>
@@ -32,11 +48,13 @@ export function generateGravityNoiseSet(device, opts = {}) {
   const sigmaD = variants[0].sigmaD
   const textures = []
   const heights = []
+  const disps = []
   for (const v of variants) {
     for (let i = 0; i < v.d.length; i++) v.d[i] /= -sigmaD
     const [hx, hy] = gradients(v.h, size)
     textures.push(createNoiseTexture(device, size, v.h, v.d, hx, hy))
     heights.push(v.h)
+    disps.push(v.d)
   }
   const [hx0] = gradients(variants[0].h, size)
   const wRaw = VARIANT_ANGLES.map((_, k) => COPY_RATIO ** k)
@@ -47,6 +65,7 @@ export function generateGravityNoiseSet(device, opts = {}) {
     wavesPerTile: wavesPerTile(variants[0].h, hx0, size),
     dispGradPerTexel: -1 / sigmaD,
     heights,
+    disps,
     // amplitude ∝ wavelength across the comb keeps per-band steepness
     // constant; unit total variance keeps the per-layer amplitude math
     copyWeights: wRaw.map(w => w / wSum),

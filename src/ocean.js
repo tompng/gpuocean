@@ -233,7 +233,10 @@ export class Ocean {
     this.phases = new Float64Array(SLOTS.length)
     this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_SCALES.length)
     this.uniformData = new Float32Array(136)
+    // the wave field as src/surface.js needs it, so the CPU replica reads the
+    // same numbers the uniform got instead of deriving them again
     this.layerCache = []
+    this.fieldCache = null
   }
 
   render(pass, dt, params, noise, capNoise, viewProj, eye, sunDir, foamIndex, filmIndex) {
@@ -308,6 +311,14 @@ export class Ocean {
     const meanLen = Math.hypot(meanX, meanZ) || 1
     u[119] = params.lean * meanX / meanLen
     u[120] = params.lean * meanZ / meanLen
+    this.fieldCache = {
+      choppiness: u[24],
+      waveK: u[27],
+      ampInv: u[115],
+      seaDepth: u[116],
+      leanX: u[119],
+      leanY: u[120],
+    }
     u[121] = params.foam
     u[122] = FOAM_REGION
     u[123] = Math.exp(-dt / params.foamLife)

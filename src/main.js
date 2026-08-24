@@ -1,4 +1,6 @@
 import { initWebGPU, fetchText } from './gpu.js'
+import { SurfaceQuery } from './surface.js'
+import { Floaters } from './floaters.js'
 import { generateGravityNoiseSet, generateCapillaryNoiseTexture, generateFoamPatternTexture } from './noise.js'
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
@@ -58,6 +60,8 @@ async function main() {
   ocean.chain = chain
   ocean.coast = coast
   const sky = new Sky(device, atmosphereCode + skyCode, format)
+  const surface = new SurfaceQuery(noise, waveField, ocean, coast, chain, weights)
+  const floaters = new Floaters(device, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
   setupNoiseDebug([
@@ -108,6 +112,10 @@ async function main() {
     chain.update(waveDt, params, (x, z) =>
       sampleWaveLevel(x, z, noise, waveField, ocean.layerCache, weights.sample(x, z, slotWeight)),
       camera.target[0], camera.target[2])
+    // the snapshot pair is last frame's, exactly as the chain drive above
+    // reads last frame's layers
+    surface.update(waveDt)
+    if (params.floaters) floaters.update(waveDt, surface, camera.target[0], camera.target[2])
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)
     capField.render(encoder)
@@ -143,6 +151,7 @@ async function main() {
     const viewProj = camera.viewProj(w / h)
     sky.render(pass, invert(viewProj), camera.eye, sunDir)
     ocean.render(pass, waveDt, params, noise, capNoise, viewProj, camera.eye, sunDir, foam.index, filmFoam.index)
+    if (params.floaters) floaters.render(pass, viewProj, sunDir)
     pass.end()
     device.queue.submit([encoder.finish()])
     requestAnimationFrame(frame)
