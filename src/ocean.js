@@ -17,28 +17,27 @@ const TILE_CELLS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 const MAX_DIST = 8000
 const MAX_TILES = 4096
 const MAX_WALLS = 4096
-// the packed list handle keeps 6 bits for the count, so at most 63 disks
-const MAX_DISKS = 63
-const MAX_DISK_LIST = 16384
 const distForCell = c => 32 + (c - 0.25) / 0.08
 const CELL = 0.4
 const LINEAR_CELLS = 160
 const CELL_GROWTH = 1.12
-// Five layers x five copies span the old 8-layer component range as a
-// fixed geometric comb; a lower layer count truncates the comb from the
-// long-wavelength end (the finest bands go first) instead of stretching
-// the spacing, so partial counts stay coherent
+// Spacing of the wave slots' geometric comb. Each slot's texture already
+// carries a five-step sub-comb of ratio COPY_RATIO, and this spacing very
+// nearly equals COPY_RATIO^4, so consecutive slots' sub-combs abut instead
+// of overlapping or leaving a gap in the spectrum.
 const LAYER_RATIO = (0.68 ** 7 / COPY_RATIO ** 4) ** 0.25
-const MAX_LAYERS = 8
-const DIR_FRACS = [0, 0.9, -0.75, 0.45, -0.35, 0.7, -1, 0.2]
-const UV_OFFSETS = [
-  [0.11, 0.63], [0.42, 0.17], [0.78, 0.55], [0.05, 0.91],
-  [0.33, 0.4], [0.66, 0.08], [0.9, 0.77], [0.24, 0.31],
+// The four wave slots. dir is a fraction of the spread angle off waveDir,
+// lambda a fraction of the base wavelength, and amp a relative amplitude
+// (proportional to lambda keeps every slot's steepness the same). Slot i's
+// spatial extent is channel i of the weight map (src/waveWeights.js).
+const SLOTS = [
+  { dir: 0, lambda: 1, amp: 1 },
+  { dir: 0.9, lambda: LAYER_RATIO, amp: LAYER_RATIO },
+  { dir: -0.75, lambda: LAYER_RATIO ** 2, amp: LAYER_RATIO ** 2 },
+  { dir: 0.45, lambda: LAYER_RATIO ** 3, amp: LAYER_RATIO ** 3 },
 ]
+const UV_OFFSETS = [[0.11, 0.63], [0.42, 0.17], [0.78, 0.55], [0.05, 0.91]]
 const CAP_ANGLES = [0.4, -0.8, 1.7]
-// Anisotropic ripple directions follow the gravity waves (fractions of spread),
-// mimicking parasitic capillaries riding their parent waves
-const CAP_ANISO_FRACS = [0, 0.45, -0.35]
 const CAP_SCALES = [1, 0.72, 0.52]
 const CAP_UV_OFFSETS = [
   [0.19, 0.47], [0.61, 0.83], [0.07, 0.29],
@@ -54,7 +53,7 @@ const RIBBON_CELLS = 140
 const FOAM_RISE = 0.08
 
 export class Ocean {
-  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, simView, coastView, sdfView, mainTableView, format, opts = {}) {
+  constructor(device, code, waveTexture, capTexture, foamViews, filmFoamViews, foamPattern, simView, coastView, sdfView, mainTableView, weights, format, opts = {}) {
     this.device = device
     this.gridN = GRID_N
     const sampleCount = opts.sampleCount ?? 4
@@ -73,8 +72,8 @@ export class Ocean {
         { binding: 8, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
         { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 10, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
-        { binding: 11, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 12, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+        { binding: 11, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 12, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: {} },
       ],
     })
     const filmLayout = device.createBindGroupLayout({
@@ -107,9 +106,9 @@ export class Ocean {
           attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
         },
         {
-          arrayStride: 16,
+          arrayStride: 12,
           stepMode: 'instance',
-          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }],
+          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x3' }],
         },
       ],
     })
@@ -137,25 +136,9 @@ export class Ocean {
     }))
 
     this.uniform = device.createBuffer({
-      size: 672,
+      size: 544,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    // Region disks: world circles modulating the wave parameters, plus the
-    // per-tile index lists rebuilt each frame alongside the tile instances.
-    // Disk data starts at offset 16 (the WGSL struct's runtime array sits
-    // after the 16-aligned count field)
-    this.disks = []
-    this.diskBuffer = device.createBuffer({
-      size: 16 + MAX_DISKS * 48,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    })
-    this.diskListBuffer = device.createBuffer({
-      size: MAX_DISK_LIST * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    })
-    this.diskData = new Float32Array(4 + MAX_DISKS * 12)
-    this.diskCountData = new Uint32Array(this.diskData.buffer, 0, 1)
-    this.diskListData = new Uint32Array(MAX_DISK_LIST)
     const sampler = device.createSampler({
       addressModeU: 'repeat',
       addressModeV: 'repeat',
@@ -181,8 +164,8 @@ export class Ocean {
         { binding: 8, resource: coastView },
         { binding: 9, resource: sdfView },
         { binding: 10, resource: mainTableView },
-        { binding: 11, resource: { buffer: this.diskBuffer } },
-        { binding: 12, resource: { buffer: this.diskListBuffer } },
+        { binding: 11, resource: weights.view },
+        { binding: 12, resource: weights.sampler },
       ],
     }))
 
@@ -193,15 +176,15 @@ export class Ocean {
     this.tileLineCount = tileLine.length
     this.tileVertexBuffer = createVertexBuffer(device, buildTileVertices(TILE_K))
     this.waterInst = device.createBuffer({
-      size: MAX_TILES * 16,
+      size: MAX_TILES * 12,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })
     this.landInst = device.createBuffer({
-      size: MAX_TILES * 16,
+      size: MAX_TILES * 12,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })
-    this.waterInstData = new Float32Array(MAX_TILES * 4)
-    this.landInstData = new Float32Array(MAX_TILES * 4)
+    this.waterInstData = new Float32Array(MAX_TILES * 3)
+    this.landInstData = new Float32Array(MAX_TILES * 3)
     // level-boundary walls: crack faces either way, so no culling
     const wallVertex = entryPoint => ({
       module,
@@ -212,12 +195,9 @@ export class Ocean {
           attributes: [{ shaderLocation: 0, offset: 0, format: 'float32' }],
         },
         {
-          arrayStride: 20,
+          arrayStride: 16,
           stepMode: 'instance',
-          attributes: [
-            { shaderLocation: 1, offset: 0, format: 'float32x4' },
-            { shaderLocation: 2, offset: 16, format: 'float32' },
-          ],
+          attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }],
         },
       ],
     })
@@ -230,10 +210,10 @@ export class Ocean {
     this.wallVertexBuffer = createVertexBuffer(device, buildWallVertices(TILE_K))
     this.wallVertCount = (TILE_K / 2) * 3
     this.wallInst = device.createBuffer({
-      size: MAX_WALLS * 20,
+      size: MAX_WALLS * 16,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })
-    this.wallInstData = new Float32Array(MAX_WALLS * 5)
+    this.wallInstData = new Float32Array(MAX_WALLS * 4)
 
     const [ribTri, ribLine] = buildIndices(RIBBON_CELLS, this.gridN)
     this.ribbonTriIndices = createIndexBuffer(device, ribTri)
@@ -250,9 +230,9 @@ export class Ocean {
     this.islandVertexBuffer = createVertexBuffer(device, buildIslandVertices(RIBBON_CELLS, ISLAND_COLS))
 
     this.time = 0
-    this.phases = new Float64Array(MAX_LAYERS)
-    this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_ANISO_FRACS.length)
-    this.uniformData = new Float32Array(168)
+    this.phases = new Float64Array(SLOTS.length)
+    this.capPhases = new Float64Array(CAP_ANGLES.length + CAP_SCALES.length)
+    this.uniformData = new Float32Array(136)
     this.layerCache = []
   }
 
@@ -262,39 +242,35 @@ export class Ocean {
     this.time += dt
     u[16] = eye[0]; u[17] = eye[1]; u[18] = eye[2]; u[19] = this.time
     u[20] = sunDir[0]; u[21] = sunDir[1]; u[22] = sunDir[2]
-    const count = Math.round(params.layers)
-    u[24] = count
-    u[25] = params.choppiness
-    u[26] = noise.size * noise.dispGradPerTexel
-    u[27] = noise.size
+    u[24] = params.choppiness
+    u[25] = noise.size * noise.dispGradPerTexel
+    u[26] = noise.size
+    u[27] = 2 * Math.PI / params.wavelength
 
     const spread = params.spread * Math.PI / 180
-    const ratio = LAYER_RATIO
-    let sq = 0
-    for (let i = 0; i < count; i++) sq += ratio ** (2 * i)
-    // amp_i ∝ λ_i keeps per-layer steepness constant; total variance = amplitude^2
-    const ampNorm = params.amplitude / Math.sqrt(sq)
+    const slotAngle = i => params.waveDir * Math.PI / 180 + SLOTS[i].dir * spread
+    // total variance = amplitude^2, so the field's RMS is the slider value
+    const ampNorm = params.amplitude / Math.hypot(...SLOTS.map(slot => slot.amp))
     let meanX = 0
     let meanZ = 0
-    for (let i = 0; i < count; i++) {
-      const lambda = params.wavelength * ratio ** i
+    for (const [i, slot] of SLOTS.entries()) {
+      const lambda = params.wavelength * slot.lambda
       const tile = lambda * noise.wavesPerTile
       this.phases[i] += Math.sqrt(GRAVITY * lambda / (2 * Math.PI)) / tile * dt
-      const angle = params.waveDir * Math.PI / 180 + DIR_FRACS[i] * spread
-      meanX += ratio ** (2 * i) * Math.cos(angle)
-      meanZ += ratio ** (2 * i) * Math.sin(angle)
+      const angle = slotAngle(i)
+      meanX += slot.amp ** 2 * Math.cos(angle)
+      meanZ += slot.amp ** 2 * Math.sin(angle)
       const o = 32 + i * 8
       u[o] = Math.cos(angle)
       u[o + 1] = Math.sin(angle)
       u[o + 2] = 1 / tile
-      u[o + 3] = ampNorm * ratio ** i
+      u[o + 3] = ampNorm * slot.amp
       u[o + 4] = UV_OFFSETS[i][0] - this.phases[i]
       u[o + 5] = UV_OFFSETS[i][1]
       u[o + 6] = 0
       u[o + 7] = 0
       this.layerCache[i] = { dx: u[o], dz: u[o + 1], invL: u[o + 2], amp: u[o + 3], su: u[o + 4], sv: u[o + 5] }
     }
-    this.layerCache.length = count
 
     // ripple slider is a slope amplitude; height amplitude = slope * λ / 2π
     const capNorm = params.ripple / Math.sqrt(CAP_SCALES.length) / (2 * Math.PI)
@@ -307,10 +283,11 @@ export class Ocean {
       const tile = lambda * (aniso ? noise : capNoise).wavesPerTile
       const k = 2 * Math.PI / lambda
       this.capPhases[i] += Math.sqrt(GRAVITY / k + CAPILLARY_SIGMA_RHO * k) / tile * dt
-      // anisotropic parasitic ripples follow the rotated gravity waves; the
-      // isotropic wind ripples keep their own fixed directions
-      const angle = aniso ? params.waveDir * Math.PI / 180 + CAP_ANISO_FRACS[j] * spread : CAP_ANGLES[j]
-      const o = 96 + i * 8
+      // anisotropic parasitic ripples ride wave slot j (the shader fades them
+      // out with its weight too); the isotropic wind ripples keep their own
+      // fixed directions
+      const angle = aniso ? slotAngle(j) : CAP_ANGLES[j]
+      const o = 64 + i * 8
       u[o] = Math.cos(angle)
       u[o + 1] = Math.sin(angle)
       u[o + 2] = 1 / tile
@@ -320,24 +297,24 @@ export class Ocean {
       u[o + 6] = 0
       u[o + 7] = 0
     }
-    u[144] = capNoise.size
-    u[145] = params.rippleBias
-    u[146] = params.sss
-    u[147] = 1 / Math.max(params.amplitude, 0.01)
-    u[148] = params.depth
-    u[149] = params.caustics
+    u[112] = capNoise.size
+    u[113] = params.rippleBias
+    u[114] = params.sss
+    u[115] = 1 / Math.max(params.amplitude, 0.01)
+    u[116] = params.depth
+    u[117] = params.caustics
     // caustic web cells scale with the ripple wavelength; 0.6 is the tuned default
-    u[150] = params.rippleScale / 0.6
+    u[118] = params.rippleScale / 0.6
     const meanLen = Math.hypot(meanX, meanZ) || 1
-    u[151] = params.lean * meanX / meanLen
-    u[152] = params.lean * meanZ / meanLen
-    u[153] = params.foam
-    u[154] = FOAM_REGION
-    u[155] = Math.exp(-dt / params.foamLife)
-    u[156] = Math.exp(-dt / (params.foamLife * 0.25))
-    u[157] = Math.exp(-dt / FOAM_RISE)
-    u[158] = params.foamLife
-    u[159] = SLOPE
+    u[119] = params.lean * meanX / meanLen
+    u[120] = params.lean * meanZ / meanLen
+    u[121] = params.foam
+    u[122] = FOAM_REGION
+    u[123] = Math.exp(-dt / params.foamLife)
+    u[124] = Math.exp(-dt / (params.foamLife * 0.25))
+    u[125] = Math.exp(-dt / FOAM_RISE)
+    u[126] = params.foamLife
+    u[127] = SLOPE
     // world foam window follows the camera, snapped to buffer texels so the
     // carried-over content resamples exactly; frozen while paused so the
     // accumulated shift never outruns the skipped foam passes
@@ -357,16 +334,15 @@ export class Ocean {
     u[30] = fdx
     u[31] = fdz
     u[23] = this.chain.islandArcStep
-    u[165] = this.chain.zBase
-    u[166] = this.chain.lastShift
-    u[167] = this.chain.tCamSnap
-    u[160] = Math.exp(-dt / 0.5)
-    u[161] = Math.min(dt, 0.033)
-    u[162] = 2 * Math.PI / params.wavelength
-    u[164] = params.foamScale
+    u[131] = this.chain.zBase
+    u[132] = this.chain.lastShift
+    u[133] = this.chain.tCamSnap
+    u[128] = Math.exp(-dt / 0.5)
+    u[129] = Math.min(dt, 0.033)
+    u[130] = params.foamScale
     this.device.queue.writeBuffer(this.uniform, 0, u)
 
-    const [waterCount, landCount, wallCount] = this.updateTileInstances(eye, viewProj, params, noise, dt)
+    const [waterCount, landCount, wallCount] = this.updateTileInstances(eye, viewProj, params)
     const wire = params.wireframe
     pass.setBindGroup(0, this.bindGroups[foamIndex])
     pass.setBindGroup(1, this.filmGroups[filmIndex])
@@ -404,52 +380,14 @@ export class Ocean {
   // frustum-tested and classified by the coast SDF: fully-land tiles skip
   // the water set (every fragment would be cut), deep-sea tiles skip the
   // land set (terrain can never rise above any visible water surface).
-  updateTileInstances(eye, viewProj, params, noise, dt) {
+  updateTileInstances(eye, viewProj, params) {
     const planes = frustumPlanes(viewProj)
-    const disks = this.disks.slice(0, MAX_DISKS)
-    // amp-raising disks and added bands push the surface above the global
-    // amplitude's bounds, so the culling boxes widen accordingly
-    let addAmpSum = 0
-    disks.forEach((d, i) => {
-      let layer = null
-      if (d.waveAmp) {
-        d.phase = (d.phase ?? 0) + Math.sqrt(GRAVITY * d.wavelength / (2 * Math.PI)) / (d.wavelength * noise.wavesPerTile) * dt
-        layer = this.diskLayer(d, i, noise)
-        addAmpSum += d.waveAmp
-      }
-      this.diskData.set([
-        d.x, d.z, d.rIn, d.rOut,
-        d.amp ?? 1, d.waveAmp ?? 0, layer?.dx ?? 1, layer?.dz ?? 0,
-        layer?.invL ?? 0, layer?.su ?? 0, layer?.sv ?? 0, 0,
-      ], 4 + i * 12)
-    })
-    const ampMax = disks.reduce((m, d) => Math.max(m, d.amp ?? 1), 1) * params.amplitude + addAmpSum
-    const pad = 4 * ampMax + 2
+    const pad = 4 * params.amplitude + 2
     const yMin = -params.depth - 3
-    const yMax = 3.5 + 4 * ampMax
+    const yMax = 3.5 + 4 * params.amplitude
     const cutSDF = -(REST_DEPTH / SLOPE + 4)
-    const landSDF = -(4 * ampMax + 1) / SLOPE
+    const landSDF = -(4 * params.amplitude + 1) / SLOPE
     const sdf = this.coast.sampleSDF
-    this.diskCountData[0] = disks.length
-    this.device.queue.writeBuffer(this.diskBuffer, 0, this.diskData, 0, 4 + disks.length * 12)
-    // Disk-list handle for one rect, packed as base * 64 + count. The test
-    // is purely geometric (rOut circle vs rect): a disk left out of a
-    // neighbouring rect's list has exactly zero influence on the shared
-    // edge, so differing lists still agree bitwise at shared vertices —
-    // which any value-based pruning would break. The identity prefix is
-    // the ribbons' list: their handle is just the disk count.
-    let listLen = disks.length
-    disks.forEach((d, i) => { this.diskListData[i] = i })
-    const diskListFor = (x0, z0, x1, z1) => {
-      const base = listLen
-      for (const [i, d] of disks.entries()) {
-        if (listLen - base >= 63 || listLen >= MAX_DISK_LIST) break
-        const dx = Math.max(x0 - d.x, d.x - x1, 0)
-        const dz = Math.max(z0 - d.z, d.z - z1, 0)
-        if (dx * dx + dz * dz < d.rOut * d.rOut) this.diskListData[listLen++] = i
-      }
-      return base * 64 + (listLen - base)
-    }
     let water = 0
     let land = 0
     let walls = 0
@@ -478,11 +416,11 @@ export class Ocean {
           // the SDF is 1-Lipschitz: five samples bound the tile's range
           // within half a span
           if (sMin - span / 2 <= cutSDF && water < MAX_TILES) {
-            this.waterInstData.set([tx / span, tz / span, cell, diskListFor(tx, tz, tx + span, tz + span)], water * 4)
+            this.waterInstData.set([tx / span, tz / span, cell], water * 3)
             water++
           }
           if (sMax + span / 2 >= landSDF && land < MAX_TILES) {
-            this.landInstData.set([tx / span, tz / span, cell, 0], land * 4)
+            this.landInstData.set([tx / span, tz / span, cell], land * 3)
             land++
           }
         }
@@ -491,73 +429,33 @@ export class Ocean {
       // boundary, where the next (coarser) level takes over
       if (!isLast) {
         for (let x = x0; x < x1; x += span) {
-          walls = this.pushWall(walls, x, z0, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
-          walls = this.pushWall(walls, x, z1, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
+          walls = this.pushWall(walls, x, z0, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf)
+          walls = this.pushWall(walls, x, z1, span, cell, 0, planes, pad, yMin, yMax, cutSDF, sdf)
         }
         for (let z = z0; z < z1; z += span) {
-          walls = this.pushWall(walls, x0, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
-          walls = this.pushWall(walls, x1, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor)
+          walls = this.pushWall(walls, x0, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf)
+          walls = this.pushWall(walls, x1, z, span, cell, 1, planes, pad, yMin, yMax, cutSDF, sdf)
         }
       }
       inner = [x0, z0, x1, z1]
     }
-    this.device.queue.writeBuffer(this.waterInst, 0, this.waterInstData, 0, water * 4)
-    this.device.queue.writeBuffer(this.landInst, 0, this.landInstData, 0, land * 4)
-    this.device.queue.writeBuffer(this.wallInst, 0, this.wallInstData, 0, walls * 5)
-    if (listLen > 0) this.device.queue.writeBuffer(this.diskListBuffer, 0, this.diskListData, 0, listLen)
+    this.device.queue.writeBuffer(this.waterInst, 0, this.waterInstData, 0, water * 3)
+    this.device.queue.writeBuffer(this.landInst, 0, this.landInstData, 0, land * 3)
+    this.device.queue.writeBuffer(this.wallInst, 0, this.wallInstData, 0, walls * 4)
     return [water, land, walls]
   }
 
-  pushWall(count, x, z, span, cell, axis, planes, pad, yMin, yMax, cutSDF, sdf, diskListFor) {
+  pushWall(count, x, z, span, cell, axis, planes, pad, yMin, yMax, cutSDF, sdf) {
     if (count >= MAX_WALLS) return count
     const x1 = axis === 0 ? x + span : x
     const z1 = axis === 0 ? z : z + span
     if (!boxVisible(planes, Math.min(x, x1) - pad, yMin, Math.min(z, z1) - pad, Math.max(x, x1) + pad, yMax, Math.max(z, z1) + pad)) return count
     const sMin = Math.min(sdf(x, z), sdf(x1, z1), sdf((x + x1) / 2, (z + z1) / 2))
     if (sMin - span / 2 > cutSDF) return count
-    this.wallInstData.set([x / cell, z / cell, cell, axis, diskListFor(Math.min(x, x1), Math.min(z, z1), Math.max(x, x1), Math.max(z, z1))], count * 5)
+    this.wallInstData.set([x / cell, z / cell, cell, axis], count * 4)
     return count + 1
   }
 
-  // A disk's added band as a pseudo-layer in the CPU layerCache format,
-  // shared between the GPU record and the chain-drive replica
-  diskLayer(d, i, noise) {
-    const a = (d.waveDir ?? 0) * Math.PI / 180
-    const off = UV_OFFSETS[i % UV_OFFSETS.length]
-    return {
-      dx: Math.cos(a),
-      dz: Math.sin(a),
-      invL: 1 / (d.wavelength * noise.wavesPerTile),
-      amp: d.waveAmp,
-      su: off[0] - (d.phase ?? 0),
-      sv: off[1],
-    }
-  }
-
-  diskFalloff(d, x, z) {
-    const t = Math.min(Math.max((Math.hypot(x - d.x, z - d.z) - d.rIn) / (d.rOut - d.rIn), 0), 1)
-    return 1 - t * t * (3 - 2 * t)
-  }
-
-  // CPU replicas of the shader's disk modulation, for the chain drive
-  diskAmpAt(x, z) {
-    let m = 1
-    for (const d of this.disks) {
-      m *= 1 + ((d.amp ?? 1) - 1) * this.diskFalloff(d, x, z)
-    }
-    return m
-  }
-
-  diskWaveLevel(x, z, noise, waveField) {
-    let sum = 0
-    this.disks.forEach((d, i) => {
-      if (!d.waveAmp) return
-      const w = this.diskFalloff(d, x, z)
-      if (w === 0) return
-      sum += w * sampleWaveLevel(x, z, noise, waveField, [this.diskLayer(d, i, noise)])
-    })
-    return sum
-  }
 }
 
 function warpAxis(i) {

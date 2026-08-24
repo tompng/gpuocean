@@ -14,17 +14,17 @@ struct Uniforms {
   time: f32,
   sunDir: vec3f,
   islandArcStep: f32,
-  numLayers: f32,
   choppiness: f32,
   dGrad: f32,
   hGrad: f32,
+  waveK: f32,
   // world foam window: center follows the camera (snapped to texels);
   // delta is the center's move since last frame in uv units
   foamCX: f32,
   foamCZ: f32,
   foamDX: f32,
   foamDZ: f32,
-  layers: array<Layer, 8>,
+  layers: array<Layer, 4>,
   capLayers: array<Layer, 6>,
   capHGrad: f32,
   rippleBias: f32,
@@ -44,8 +44,6 @@ struct Uniforms {
   slope: f32,
   foamDecaySwallow: f32,
   simDt: f32,
-  waveK: f32,
-  padC: f32,
   foamScale: f32,
   // mainland film window: center z (follows the camera in whole-column
   // steps) and this frame's shift in film-foam buffer rows
@@ -65,35 +63,22 @@ fn layerUV(xz: vec2f, i: i32) -> vec2f {
   return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * l.dirScaleAmp.z + l.scroll.xy;
 }
 
-// Region disks modulate the waves inside world-space circles: a
-// multiplier on the global field, plus optionally the disk's own
-// directed wave band added on top (one band per disk — spectra are
-// authored by stacking disks). A disk's influence is exactly zero at
-// rOut and beyond, so consumers that scan differing subsets (per-tile
-// lists in the ocean shader, the whole set elsewhere) agree bitwise
-// wherever they overlap — extras multiply by 1.0 and add 0.0.
-struct Disk {
-  // center x, z, full-weight radius rIn, zero-weight radius rOut
-  posR: vec4f,
-  // x: multiplier on the global field, y: added-band amplitude,
-  // zw: added-band direction (unit)
-  mods: vec4f,
-  // x: added-band inverse tile size, yz: added-band scroll offset
-  wave: vec4f,
-}
-struct DiskBuf {
-  count: u32,
-  data: array<Disk>,
-}
-@group(0) @binding(11) var<storage, read> diskBuf: DiskBuf;
+// Per-slot spatial weights (src/waveWeights.js): channel i scales slot i's
+// amplitude, so a region can lose one swell direction while keeping the
+// others, or lose them all and go calm. The slot directions and wavelengths
+// stay global and only the weight varies in space, which keeps neighbouring
+// mesh tiles bitwise-consistent at shared vertices: the weight is a
+// continuous function of world position, sampled the same way by every tile.
+@group(0) @binding(11) var weightTex: texture_2d<f32>;
+// samp repeats, and the weight map must clamp to its rim instead
+@group(0) @binding(12) var weightSamp: sampler;
 
-fn diskWeight(d: Disk, xz: vec2f) -> f32 {
-  return 1.0 - smoothstep(d.posR.z, d.posR.w, distance(xz, d.posR.xy));
-}
+const SLOTS: i32 = 4;
+// must match EXTENT in src/waveWeights.js
+const WEIGHT_EXTENT: f32 = 384.0;
 
-fn diskUV(d: Disk, xz: vec2f) -> vec2f {
-  let dir = d.mods.zw;
-  return vec2f(dot(xz, dir), dot(xz, vec2f(-dir.y, dir.x))) * d.wave.x + d.wave.yz;
+fn slotWeights(xz: vec2f) -> vec4f {
+  return textureSampleLevel(weightTex, weightSamp, xz / (2.0 * WEIGHT_EXTENT) + 0.5, 0.0);
 }
 
 // The coastline is authored data (src/coast.js) baked at load into a

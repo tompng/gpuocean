@@ -251,18 +251,18 @@ function smoothSeg(a, offset, stride, j0, j1, wrap, k) {
 const DRIVE_LEVEL = 1.0
 const LEVEL_TAU = 1.0
 
-export function sampleWaveLevel(x, z, noise, waveField, layers) {
+export function sampleWaveLevel(x, z, noise, waveField, layers, weights) {
   const size = noise.size
   const copies = waveField.data
   let hsum = 0
-  for (const l of layers) {
+  for (const [i, l] of layers.entries()) {
     const u0 = (x * l.dx + z * l.dz) * l.invL + l.su
     const v0 = (-x * l.dz + z * l.dx) * l.invL + l.sv
     let sh = 0
     for (let k = 0; k < noise.heights.length; k++) {
       sh += copies[k * 4 + 2] * bilinearWrap(noise.heights[k], size, u0 + copies[k * 4], v0 + copies[k * 4 + 1])
     }
-    hsum += l.amp * sh
+    hsum += l.amp * weights[i] * sh
   }
   return hsum * DRIVE_LEVEL / SLOPE
 }

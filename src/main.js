@@ -2,6 +2,7 @@ import { initWebGPU, fetchText } from './gpu.js'
 import { generateGravityNoiseSet, generateCapillaryNoiseTexture, generateFoamPatternTexture } from './noise.js'
 import { WaveField } from './waveField.js'
 import { Ocean } from './ocean.js'
+import { WaveWeights } from './waveWeights.js'
 import { FoamSim } from './foam.js'
 import { ChainSim, sampleWaveLevel } from './chain.js'
 import { buildCoast } from './coast.js'
@@ -16,6 +17,18 @@ const GRAVITY = 9.81
 const CAPILLARY_SIGMA_RHO = 7.4e-5
 const CAP_DISPERSION = 1.5
 const SUN_AZIMUTH = [0.65, -0.76]
+const slotWeight = new Float32Array(4)
+
+// A wobbly blob: 0 well inside, ramping to 1 outside. The square puts the
+// smooth join at the open-sea end, where the waves are at full height and a
+// corner in the envelope would show; the corner it leaves at the calm end
+// sits at zero amplitude
+function blobShadow(x, z, cx, cz, r) {
+  const px = (x - cx) / r
+  const pz = (z - cz) / r
+  const f = px * px + pz * pz - (Math.sin(4 * px) + Math.sin(5 * pz) + 2) / 6
+  return 1 - Math.min(Math.max(1 - f, 0), 1) ** 2
+}
 
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
@@ -31,14 +44,19 @@ async function main() {
   const coast = buildCoast(device)
   const chain = new ChainSim(device, coast)
   const filmFoam = new FoamSim(device, waveCommonCode + filmFoamCode, [128, 256])
-  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, format)
-  foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView, ocean.diskBuffer)
+  // Demo weight field: the larger blob kills slots 0 and 1 only, so swell
+  // still arrives there from the other two directions; the smaller one kills
+  // all four into a calm patch.
+  const weights = new WaveWeights(device, (x, z) => {
+    const a = blobShadow(x, z, -85, 95, 75)
+    const b = blobShadow(x, z, -70, -55, 40)
+    return [a * b, a * b, b, b]
+  })
+  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, weights, format)
+  foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView, weights)
   filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
   ocean.coast = coast
-  ocean.disks = [
-    { x: -85, z: 95, rIn: 35, rOut: 75, amp: 0.35, waveDir: 120, wavelength: 6, waveAmp: 0.15 },
-  ]
   const sky = new Sky(device, atmosphereCode + skyCode, format)
   const camera = new OrbitCamera(canvas)
   const params = setupUI()
@@ -88,8 +106,7 @@ async function main() {
     const capSpeed = Math.sqrt(GRAVITY / capK + CAPILLARY_SIGMA_RHO * capK)
     capField.update(waveDt, capSpeed / (params.rippleScale * capNoise.wavesPerTile), CAP_DISPERSION)
     chain.update(waveDt, params, (x, z) =>
-      sampleWaveLevel(x, z, noise, waveField, ocean.layerCache) * ocean.diskAmpAt(x, z)
-        + ocean.diskWaveLevel(x, z, noise, waveField),
+      sampleWaveLevel(x, z, noise, waveField, ocean.layerCache, weights.sample(x, z, slotWeight)),
       camera.target[0], camera.target[2])
     const encoder = device.createCommandEncoder()
     waveField.render(encoder)

@@ -23,35 +23,12 @@ fn waveSurface(xz: vec2f) -> vec2f {
   var dzz = 1.0;
   var height = 0.0;
   var gradH = vec2f(0.0);
-  // region disks: the multiplier scales the global layers below, the
-  // added bands accumulate their own terms directly
-  var ampMul = 1.0;
-  for (var i = 0u; i < diskBuf.count; i++) {
-    let d = diskBuf.data[i];
-    let w = diskWeight(d, xz);
-    ampMul *= mix(1.0, d.mods.x, w);
-    let amp = w * d.mods.y;
-    if (amp > 0.0) {
-      let dir = d.mods.zw;
-      let invL = d.wave.x;
-      let s = textureSampleLevel(waveTex, samp, diskUV(d, xz), 0.0);
-      let duvdx = vec2f(dir.x, -dir.y) * invL;
-      let duvdz = vec2f(dir.y, dir.x) * invL;
-      let grad = vec2f(s.z, s.w) * u.hGrad;
-      let dDdu = u.choppiness * amp * s.x * u.dGrad;
-      height += amp * s.x;
-      gradH += amp * vec2f(dot(grad, duvdx), dot(grad, duvdz));
-      dxx += dir.x * dDdu * duvdx.x;
-      dxz += dir.y * dDdu * duvdx.x;
-      dzx += dir.x * dDdu * duvdz.x;
-      dzz += dir.y * dDdu * duvdz.x;
-    }
-  }
-  for (var i = 0; i < i32(u.numLayers); i++) {
+  let wgt = slotWeights(xz);
+  for (var i = 0; i < SLOTS; i++) {
     let l = u.layers[i];
     let dir = l.dirScaleAmp.xy;
     let invL = l.dirScaleAmp.z;
-    let amp = l.dirScaleAmp.w * ampMul;
+    let amp = l.dirScaleAmp.w * wgt[i];
     let s = textureSampleLevel(waveTex, samp, layerUV(xz, i), 0.0);
     let duvdx = vec2f(dir.x, -dir.y) * invL;
     let duvdz = vec2f(dir.y, dir.x) * invL;
