@@ -32,8 +32,8 @@ function blobShadow(x, z, cx, cz, r) {
 
 async function main() {
   const { device, context, format } = await initWebGPU(canvas)
-  const [waveFieldCode, waveCommonCode, oceanCode, atmosphereCode, skyCode, foamCode, filmFoamCode] = await Promise.all(
-    ['wave_field', 'wave_common', 'ocean', 'atmosphere', 'sky', 'foam', 'filmfoam'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
+  const [waveFieldCode, waveCommonCode, sunlightCode, oceanCode, atmosphereCode, skyCode, foamCode, filmFoamCode] = await Promise.all(
+    ['wave_field', 'wave_common', 'sunlight', 'ocean', 'atmosphere', 'sky', 'foam', 'filmfoam'].map(name => fetchText(new URL(`../shaders/${name}.wgsl`, import.meta.url)))
   )
   const noise = generateGravityNoiseSet(device)
   const capNoise = generateCapillaryNoiseTexture(device)
@@ -52,7 +52,7 @@ async function main() {
     const b = blobShadow(x, z, -70, -55, 40)
     return [a * b, a * b, b, b]
   })
-  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, weights, format)
+  const ocean = new Ocean(device, atmosphereCode + waveCommonCode + sunlightCode + oceanCode, waveField.texture, capField.texture, foam.views, filmFoam.views, foamPattern, chain.view, chain.coastView, coast.sdfView, coast.mainTableView, weights, format)
   foam.bind(ocean.uniform, waveField.texture, null, coast.sdfView, weights)
   filmFoam.bind(ocean.uniform, null, chain.view, null)
   ocean.chain = chain
