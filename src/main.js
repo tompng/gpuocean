@@ -41,7 +41,7 @@ async function main() {
   const capNoise = generateCapillaryNoiseTexture(device)
   const waveField = new WaveField(device, waveFieldCode, noise)
   const capField = new WaveField(device, waveFieldCode, capNoise)
-  const foamPattern = generateFoamPatternTexture(device)
+  const foamPattern = generateFoamPatternTexture(device, { size: 128 })
   const foam = new FoamSim(device, waveCommonCode + foamCode)
   const coast = buildCoast(device)
   const chain = new ChainSim(device, coast)

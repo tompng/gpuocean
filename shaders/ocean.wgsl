@@ -392,6 +392,11 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
 
 // far-foam calibration: extra crest passages counted per foam lifetime
 const SWEEP_K: f32 = 1.2;
+// World size of one tile of the foam pattern. This is a TEXEL DENSITY setting
+// (~51 texels/m): move it with the texture's resolution, not against it, or
+// the filaments change size. The tile then repeats over a few metres, which
+// nothing notices as long as the sea is not wall-to-wall foam.
+const FOAM_PAT_TILE: f32 = 2.5;
 // How much of the ambient wrap term a shadow removes. The dry sand below
 // is also drawn by the land shader, and by whatever terrain shader the
 // embedding scene owns, so all of them must use this same value or the
@@ -537,11 +542,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // Eroding a single pattern at blended coordinates smears it into
   // streaks across the handover where the frames diverge.
   let filmAcc = filmFoamAt(in.st.x, in.st.y).rgb;
-  let patWave = textureSample(foamPatTex, samp, in.waveXZ / (5.0 * u.foamScale)).r;
+  let patWave = textureSample(foamPatTex, samp, in.waveXZ / (FOAM_PAT_TILE * u.foamScale)).r;
   // Over-compressed foam filaments merge instead of thinning forever: as
   // the film compresses, blend toward a pattern that is coarser in the
   // cross-shore direction only, so the rendered streaks stop shrinking
-  let patFilmUV = vec2f(in.st.x, colT(in.st.y)) / (5.0 * u.foamScale);
+  let patFilmUV = vec2f(in.st.x, colT(in.st.y)) / (FOAM_PAT_TILE * u.foamScale);
   let patFine = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 3.0, patFilmUV.y)).r;
   let patCoarse = textureSample(foamPatTex, samp, vec2f(patFilmUV.x / 9.0, patFilmUV.y)).r;
   let patFilm = mix(patFine, patCoarse, 1.0 - smoothstep(0.07, 0.4, in.stretch));
