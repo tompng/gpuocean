@@ -514,12 +514,24 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the sand under a thin film is a shadow caster itself, and the wave
   // normal would swing the bias around with the ripples
   let occ = sunOcclusionPair(in.world, vec3f(bottomXZ.x, ty, bottomXZ.y), nTerr);
-  let cs = textureSample(capTex, samp, bottomXZ / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
-         + textureSample(capTex, samp, bottomXZ / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
-  let web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
+  // Derivatives have to be taken here, in uniform control flow, to pick the
+  // mip inside the branch below
+  let bmpp = length(fwidth(bottomXZ));
   // Caustics need some water column to focus in; a centimeters-thin film
   // (or the residual softmax offset on dry sand) must not carry the web
   let focus = occ.bed * u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * smoothstep(0.04, 0.25, column);
+  // Both factors reach exactly zero — past 120 m, and on anything shallower
+  // than a puddle — so the web is skipped rather than computed and multiplied
+  // away. That covers the whole horizon, where these are the widest taps in
+  // the shader
+  var web = 0.0;
+  if (focus > 0.0) {
+    let s0 = 13.0 * u.causticScale;
+    let s1 = 8.7 * u.causticScale;
+    let cs = textureSampleLevel(capTex, samp, bottomXZ / s0 + vec2f(0.023, 0.011) * u.time, log2(max(bmpp * u.capHGrad / s0, 1.0))).x
+           + textureSampleLevel(capTex, samp, bottomXZ / s1 + vec2f(-0.017, 0.019) * u.time, log2(max(bmpp * u.capHGrad / s1, 1.0))).x;
+    web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
+  }
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
   let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
   // Direct sunlight in the water column fades as the sun drops; the floor
