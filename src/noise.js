@@ -179,18 +179,20 @@ export function generateFoamPatternTexture(device, opts = {}) {
   }
 
   const mipCount = Math.log2(size) + 1
+  // one channel: the shader only ever reads .r, and this texture is sampled
+  // three times per water fragment, so the other three would be pure cache
   const texture = device.createTexture({
     size: [size, size],
-    format: 'rgba16float',
+    format: 'r16float',
     mipLevelCount: mipCount,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   })
   let cur = density
   let s = size
   for (let level = 0; level < mipCount; level++) {
-    const data = new Uint16Array(s * s * 4)
-    for (let i = 0; i < s * s; i++) data[i * 4] = floatToHalf(cur[i])
-    device.queue.writeTexture({ texture, mipLevel: level }, data, { bytesPerRow: s * 8 }, [s, s])
+    const data = new Uint16Array(s * s)
+    for (let i = 0; i < s * s; i++) data[i] = floatToHalf(cur[i])
+    device.queue.writeTexture({ texture, mipLevel: level }, data, { bytesPerRow: s * 2 }, [s, s])
     if (s > 1) {
       const half = s / 2
       const next = new Float32Array(half * half)

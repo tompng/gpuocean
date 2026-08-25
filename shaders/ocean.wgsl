@@ -428,16 +428,12 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let hx = terrainHeight(in.world.xz + vec2f(eT, 0.0)) - terrainHeight(in.world.xz - vec2f(eT, 0.0));
   let hz = terrainHeight(in.world.xz + vec2f(0.0, eT)) - terrainHeight(in.world.xz - vec2f(0.0, eT));
   let nTerr = normalize(vec3f(-hx / (2.0 * eT), 1.0, -hz / (2.0 * eT)));
-  // Biased off the terrain, not off the water: the sand under a thin film
-  // is a shadow caster itself, and the wave normal would swing the bias
-  // around with the ripples
-  let occ = sunOcclusion(in.world, nTerr);
   n = normalize(mix(nTerr, n, waterM));
   let v = normalize(u.cameraPos - in.world);
   if (dot(n, v) < 0.0) { n = -n; }
   let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
   let r = reflect(-v, n);
-  let spec = occ * sunTint(u.sunDir) * (mix(8.0, 4.5, sunWarmth(u.sunDir)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
+  let spec = sunTint(u.sunDir) * (mix(8.0, 4.5, sunWarmth(u.sunDir)) * pow(max(dot(r, u.sunDir), 0.0), 600.0));
   let fCenter = vec2f(u.foamCX, u.foamCZ);
   // World foam anchors at waveXZ, not gridXZ: identical on the open grid,
   // but on the film gridXZ is the 28m material band (a 14x metric mismatch
@@ -489,7 +485,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // too thin to hold a submerged bubble cloud, so the glow fades out there
   // and its foam reads as surface foam only
   let towardSun = max(0.0, -dot(v, u.sunDir));
-  let sss = occ * u.sssStrength * (0.55 + 0.45 * towardSun * towardSun) * foamAcc.g * (1.0 - sbF);
+  let sss = u.sssStrength * (0.55 + 0.45 * towardSun * towardSun) * foamAcc.g * (1.0 - sbF);
   // Flat sand bottom seen through the refracted view ray with per-channel
   // Beer-Lambert extinction; +1.4 is the sun-side path per meter of column
   // (refracted solar zenith ~44°)
@@ -505,23 +501,28 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // two drifting noise fields, sampled at the refracted bottom point so the
   // pattern swims with the surface; defocus fades it with column depth
   let bottomXZ = in.world.xz + refr.xz * (column * lateral);
+  // The bed is flat over the refraction offset, the same assumption the sand
+  // colour above already makes. Biased off the terrain, not off the water:
+  // the sand under a thin film is a shadow caster itself, and the wave
+  // normal would swing the bias around with the ripples
+  let occ = sunOcclusionPair(in.world, vec3f(bottomXZ.x, ty, bottomXZ.y), nTerr);
   let cs = textureSample(capTex, samp, bottomXZ / (13.0 * u.causticScale) + vec2f(0.023, 0.011) * u.time).x
          + textureSample(capTex, samp, bottomXZ / (8.7 * u.causticScale) + vec2f(-0.017, 0.019) * u.time).x;
   let web = pow(max(0.0, 1.0 - 0.6 * abs(cs)), 4.0);
   // Caustics need some water column to focus in; a centimeters-thin film
   // (or the residual softmax offset on dry sand) must not carry the web
-  let focus = occ * u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * smoothstep(0.04, 0.25, column);
+  let focus = occ.bed * u.causticStrength * exp(-column * 0.12) * clamp(1.0 - dist / 120.0, 0.0, 1.0) * smoothstep(0.04, 0.25, column);
   let sand = vec3f(0.86, 0.78, 0.58) * (0.85 + focus * (1.6 * web - 0.18));
   let lightTint = mix(vec3f(1.0), sunTint(u.sunDir), 0.6);
   // Direct sunlight in the water column fades as the sun drops; the floor
   // stands in for diffuse sky light
   let sunLevel = mix(0.18, 1.0, smoothstep(0.0, 0.5, clamp(u.sunDir.y, 0.0, 1.0)));
-  var water = mix(vec3f(0.004, 0.02, 0.05), sand, trans) * lightTint * mix(1.0, occ, SHADOW_WRAP);
-  water += vec3f(0.05, 0.45, 0.38) * sss;
+  var water = mix(vec3f(0.004, 0.02, 0.05), sand, trans) * lightTint * mix(1.0, occ.bed, SHADOW_WRAP);
+  water += vec3f(0.05, 0.45, 0.38) * (sss * occ.surface);
   water *= sunLevel;
-  var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec;
+  var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec * occ.surface;
   // Dry sand above the runup line: matte, no fresnel reflection or caustics
-  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0)) * mix(1.0, occ, SHADOW_WRAP);
+  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0)) * mix(1.0, occ.surface, SHADOW_WRAP);
   color = mix(sandMatte, color, waterM);
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
@@ -561,7 +562,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // the masks are thresholded 0/1 fields, so foam is present when either
   // system says so — a blend would half-fade both across the handover
   let foamMask = min(maskWave + maskFilm, 1.0);
-  let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0)) * mix(1.0, occ, SHADOW_WRAP);
+  let foamColor = lightTint * mix(0.45, 1.0, sunLevel) * (0.72 + 0.22 * max(n.y, 0.0)) * mix(1.0, occ.surface, SHADOW_WRAP);
   color = mix(color, foamColor, foamMask);
   let fog = 1.0 - exp(-dist * 3e-5);
   color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
