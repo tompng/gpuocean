@@ -21,6 +21,15 @@ import { REST_DEPTH, SLOPE } from './chain.js'
 // must match wave_common.wgsl
 const SIM_SPAN = 24
 const SIM_BAND = 4
+// must match ocean.wgsl
+const COPY_FINE = 1.75
+// The floor of cellForDistance: the mesh never resolves finer than this, so a
+// slot the attenuation kills here is drawn nowhere. Attenuating on the floor
+// rather than on the query's own distance keeps the surface a function of
+// world position alone — the same point must not change height because the
+// camera moved — and inside the floor's range (32 m, which is where anything
+// small enough to float is visible) the two agree exactly.
+const FINEST_CELL = 0.25
 // the junction translation band of ribbonVertex
 const JUNCTION_BLEND = 12
 
@@ -73,9 +82,11 @@ export class SurfaceQuery {
   }
 
   // Material xz -> wave height and horizontal displacement, mirroring
-  // sampleWaves() in ocean.wgsl minus its distance-keyed band attenuation:
-  // that one exists to keep the MESH from aliasing, and a floater wants the
-  // field the water actually has.
+  // sampleWaves() in ocean.wgsl. The band attenuation is part of that: the
+  // finest slots are damped to near nothing as GEOMETRY even right under the
+  // camera (the fragment normals carry them instead), so a floater that used
+  // the unattenuated field would ride several centimetres of short-wave
+  // wiggle that is nowhere on the drawn water.
   fieldAt(px, pz, s, wgt, out) {
     const { heights, disps, size } = this.noise
     let h = 0
@@ -83,7 +94,8 @@ export class SurfaceQuery {
     let dz = 0
     for (let i = 0; i < s.layers.length; i++) {
       const l = s.layers[i]
-      const w = wgt[i]
+      const att = 1 - smoothstep(2, 6, FINEST_CELL * l.invL * size * COPY_FINE)
+      const w = wgt[i] * att
       if (w <= 0 || l.amp <= 0) continue
       const u0 = (px * l.dx + pz * l.dz) * l.invL + l.su
       const v0 = (-px * l.dz + pz * l.dx) * l.invL + l.sv
