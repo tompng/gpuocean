@@ -13,18 +13,41 @@ const DISPERSION_JITTER = [0.55, -0.45, 0.3, -0.6, -0.37]
 const COPY_FACTORS_Y = [0.5, -0.35, -0.65, 0.2, 0.35]
 const COPY_OFFSETS = [[0.13, 0.71], [0.53, 0.29], [0.87, 0.61], [0.31, 0.07], [0.67, 0.43]]
 
+// 2x2 box downsample, one level per pass. A linear tap at the destination
+// texel's centre lands exactly between the four source texels, so the filter
+// is the box average with no explicit weights.
+const MIP_CODE = /* wgsl */`
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var src: texture_2d<f32>;
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  let xy = vec2f(vec2u((vi << 1u) & 2u, vi & 2u));
+  return vec4f(xy * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let n = vec2f(textureDimensions(src, 0)) * 0.5;
+  return textureSampleLevel(src, samp, pos.xy / n, 0.0);
+}
+`
+
 export class WaveField {
   // The noise is band-limited, so instead of mipmaps the renderers apply an
   // analytic per-layer attenuation matched to their sampling footprint.
-  constructor(device, code, noise) {
+  // opts.mips: keep a mip chain. The renderers replace mip filtering with an
+  // analytic per-band attenuation, so this is not about aliasing — it is for
+  // the taps whose footprint is several texels wide, which read level 0
+  // incoherently and thrash the cache.
+  constructor(device, code, noise, opts = {}) {
     this.device = device
     this.size = noise.size
+    this.mipCount = opts.mips ? Math.log2(this.size) + 1 : 1
     this.texture = device.createTexture({
       size: [this.size, this.size],
       format: 'rgba16float',
+      mipLevelCount: this.mipCount,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     })
     this.view = this.texture.createView()
+    this.target = this.texture.createView({ baseMipLevel: 0, mipLevelCount: 1 })
 
     const module = device.createShaderModule({ code })
     this.pipeline = device.createRenderPipeline({
@@ -59,6 +82,29 @@ export class WaveField {
     this.phases = COPY_FACTORS.map(() => 0)
     this.phasesY = COPY_FACTORS.map(() => 0)
     this.data = new Float32Array(COPY_FACTORS.length * 4)
+    this.mipTargets = []
+    if (this.mipCount > 1) this.initMips(device, sampler)
+  }
+
+  initMips(device, sampler) {
+    const module = device.createShaderModule({ code: MIP_CODE })
+    this.mipPipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+    })
+    this.mipTargets = []
+    this.mipBinds = []
+    for (let level = 1; level < this.mipCount; level++) {
+      this.mipTargets.push(this.texture.createView({ baseMipLevel: level, mipLevelCount: 1 }))
+      this.mipBinds.push(device.createBindGroup({
+        layout: this.mipPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: sampler },
+          { binding: 1, resource: this.texture.createView({ baseMipLevel: level - 1, mipLevelCount: 1 }) },
+        ],
+      }))
+    }
   }
 
   // texFreq: scroll speed in tiles per second matching the texture's dominant wave
@@ -73,11 +119,20 @@ export class WaveField {
 
   render(encoder) {
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.view, loadOp: 'clear', storeOp: 'store' }],
+      colorAttachments: [{ view: this.target, loadOp: 'clear', storeOp: 'store' }],
     })
     pass.setPipeline(this.pipeline)
     pass.setBindGroup(0, this.bindGroup)
     pass.draw(3)
     pass.end()
+    for (let i = 0; i < this.mipTargets.length; i++) {
+      const p = encoder.beginRenderPass({
+        colorAttachments: [{ view: this.mipTargets[i], loadOp: 'clear', storeOp: 'store' }],
+      })
+      p.setPipeline(this.mipPipeline)
+      p.setBindGroup(0, this.mipBinds[i])
+      p.draw(3)
+      p.end()
+    }
   }
 }

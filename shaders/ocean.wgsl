@@ -378,7 +378,10 @@ fn surfaceNormal(xz: vec2f, rippleXZ: vec2f, dist: f32, eta: f32, hScale: f32) -
       let uvc = vec2f(dot(rippleXZ, dir), dot(rippleXZ, vec2f(-dir.y, dir.x))) * invL + l.scroll.xy;
       var s: vec4f;
       if (i < 3) {
-        s = textureSampleLevel(capTex, samp, uvc, 0.0);
+        // capTex carries a mip chain: past ~1 texel per pixel a level-0 tap
+        // walks the whole tile per quad. The amplitude attenuation above is
+        // still what fades the band out; this only makes the read coherent
+        s = textureSampleLevel(capTex, samp, uvc, log2(max(mpp * invL * u.capHGrad, 1.0)));
       } else {
         s = textureSampleLevel(waveTex, samp, uvc, 0.0);
       }
