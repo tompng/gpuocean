@@ -541,9 +541,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   water += vec3f(0.05, 0.45, 0.38) * (sss * occ.surface);
   water *= sunLevel;
   var color = mix(water, skyColor(r, u.sunDir), fresnel) + spec * occ.surface;
-  // Dry sand above the runup line: matte, no fresnel reflection or caustics
-  let sandMatte = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0)) * mix(1.0, occ.surface, SHADOW_WRAP);
-  color = mix(sandMatte, color, waterM);
+  // Dry sand above the runup line: no fresnel reflection or caustics, but the
+  // same wet-sand specular as fs_land — the film's tip abuts fs_land's sand,
+  // so a missing term here shows the ribbon edge as a light step toward the sun
+  var sandLit = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0)) * mix(1.0, occ.surface, SHADOW_WRAP);
+  let wet = 1.0 - smoothstep(0.0, 0.45, in.world.y);
+  sandLit += lightTint * sunLevel * occ.surface * sandSpec(n, v, u.sunDir, mix(SAND_ROUGH, WET_ROUGH, wet));
+  color = mix(sandLit, color, waterM);
   // The foam pattern rides the water (material coords); as the accumulated
   // foam decays the threshold rises, eroding the pattern from its thin parts
   // so patches fragment into clumps before vanishing
@@ -609,6 +613,24 @@ fn vs_land(in: TileIn) -> VSOut {
   return out;
 }
 
+// GGX + Kelemen sand specular, dielectric F0. Tightens as the sand nears the
+// waterline, where the swash keeps it wet.
+const SAND_ROUGH: f32 = 0.55;
+const WET_ROUGH: f32 = 0.22;
+
+fn sandSpec(N: vec3f, C: vec3f, L: vec3f, rough: f32) -> f32 {
+  let ndl = dot(N, L);
+  let ndv = dot(N, C);
+  if (ndl <= 0.0 || ndv <= 0.0) { return 0.0; }
+  let H = normalize(L + C);
+  let ndh = max(dot(N, H), 0.0);
+  let a2 = max(rough * rough, 1e-3);
+  let den = ndh*ndh*(a2*a2 - 1.0) + 1.0;
+  let dTerm = a2*a2 / (3.14159265 * den * den);
+  let f = 0.03 + 0.97 * pow(1.0 - max(dot(C, H), 0.0), 5.0);
+  return dTerm * f * 0.25 / max(ndl + ndv - ndl*ndv, 1e-3) * ndl;
+}
+
 @fragment
 fn fs_land(in: VSOut) -> @location(0) vec4f {
   let e = 0.5;
@@ -621,6 +643,8 @@ fn fs_land(in: VSOut) -> @location(0) vec4f {
   var color = vec3f(0.86, 0.78, 0.58) * lightTint * sunLevel * (0.55 + 0.45 * max(n.y, 0.0)) * mix(1.0, occ, SHADOW_WRAP);
   let dist = distance(u.cameraPos, in.world);
   let v = normalize(u.cameraPos - in.world);
+  let wet = 1.0 - smoothstep(0.0, 0.45, in.world.y);
+  color += lightTint * sunLevel * occ * sandSpec(n, v, u.sunDir, mix(SAND_ROUGH, WET_ROUGH, wet));
   let fog = 1.0 - exp(-dist * 3e-5);
   color = mix(color, skyColor(normalize(vec3f(-v.x, 0.02, -v.z)), u.sunDir), fog);
   color = 1.0 - exp(-1.8 * color);
