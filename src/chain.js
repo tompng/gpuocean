@@ -49,6 +49,7 @@ export class ChainSim {
     this.drive = new Float32Array(COLS)
     this.prevXi = new Float32Array(COLS)
     this.levelLP = new Float32Array(COLS)
+    this.levelLP2 = new Float32Array(COLS)
     this.ve = new Float32Array(COLS)
     this.key = ''
     this.texData = new Float32Array(NODES * COLS * 4)
@@ -91,6 +92,7 @@ export class ChainSim {
       this.u.copyWithin(dst * NODES, src * NODES, (src + 1) * NODES)
       this.prevXi[dst] = this.prevXi[src]
       this.levelLP[dst] = this.levelLP[src]
+      this.levelLP2[dst] = this.levelLP2[src]
     }
     // rows shifted in from beyond the window clone the edge column: a much
     // better initial state than rest, settling within a wave period
@@ -140,6 +142,7 @@ export class ChainSim {
     this.u.fill(0)
     this.prevXi.fill(0)
     this.levelLP.fill(0)
+    this.levelLP2.fill(0)
     this.ve.fill(0)
   }
 
@@ -157,12 +160,16 @@ export class ChainSim {
       if (steps !== 0) this.lastShift = this.shiftWindow(steps)
       // The junction is positionally driven, so the chain's own inertia
       // never filters the drive; the level's short-period components get
-      // an explicit low-pass instead
+      // an explicit low-pass instead. Two cascaded poles, not one: ve below
+      // differentiates the result, and after a single pole that derivative
+      // is flat in frequency, feeding every short-wave chop into the film
+      // as full-strength velocity
       const kLP = 1 - Math.exp(-dt / LEVEL_TAU)
       for (let j = 0; j < COLS; j++) {
         const level = sampleLevel(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1])
         this.levelLP[j] += (level - this.levelLP[j]) * kLP
-        const xi = this.levelLP[j]
+        this.levelLP2[j] += (this.levelLP[j] - this.levelLP2[j]) * kLP
+        const xi = this.levelLP2[j] * params.swashDrive
         this.drive[j] = this.sJ + xi
         this.ve[j] = Math.max(-MAX_DRIVE_SPEED, Math.min((xi - this.prevXi[j]) / dt, MAX_DRIVE_SPEED))
         this.prevXi[j] = xi
@@ -254,8 +261,9 @@ function smoothSeg(a, offset, stride, j0, j1, wrap, k) {
 // orbital displacement is deliberately NOT part of it — it is ~90 degrees
 // ahead of the level and unfiltered it yanks the junction seaward at
 // every large crest-to-trough flip, over-stretching the film.
-const DRIVE_LEVEL = 1.0
-const LEVEL_TAU = 1.0
+// Per-stage time constant of the two-pole cascade; 0.64 puts the cascade's
+// -3 dB point where the old single pole's tau = 1.0 had it
+const LEVEL_TAU = 0.64
 
 export function sampleWaveLevel(x, z, noise, waveField, layers, weights) {
   const size = noise.size
@@ -270,5 +278,5 @@ export function sampleWaveLevel(x, z, noise, waveField, layers, weights) {
     }
     hsum += l.amp * weights[i] * sh
   }
-  return hsum * DRIVE_LEVEL / SLOPE
+  return hsum / SLOPE
 }
