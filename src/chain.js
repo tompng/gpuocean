@@ -165,10 +165,18 @@ export class ChainSim {
       // is flat in frequency, feeding every short-wave chop into the film
       // as full-strength velocity
       const kLP = 1 - Math.exp(-dt / LEVEL_TAU)
+      const kEbb = 1 - Math.exp(-dt / params.ebbTau)
       for (let j = 0; j < COLS; j++) {
         const level = sampleLevel(this.juncWorld[j * 2], this.juncWorld[j * 2 + 1])
         this.levelLP[j] += (level - this.levelLP[j]) * kLP
-        this.levelLP2[j] += (this.levelLP[j] - this.levelLP2[j]) * kLP
+        // The second stage falls on a slower time constant than it rises:
+        // broken bores arrive as a steep front but the level's drop is
+        // drainage-limited, and a symmetric drive over-yanks the film
+        // seaward on every sharp trough. The film needs the drive to stay
+        // C1; the constants swap only where the tracking rate crosses
+        // zero, so no kink
+        const k2 = this.levelLP[j] >= this.levelLP2[j] ? kLP : kEbb
+        this.levelLP2[j] += (this.levelLP[j] - this.levelLP2[j]) * k2
         const xi = this.levelLP2[j] * params.swashDrive
         this.drive[j] = this.sJ + xi
         this.ve[j] = Math.max(-MAX_DRIVE_SPEED, Math.min((xi - this.prevXi[j]) / dt, MAX_DRIVE_SPEED))
